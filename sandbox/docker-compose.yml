@@ -1,0 +1,192 @@
+# octopOS Sandbox - Docker Compose Configuration
+# Local orchestration for ephemeral worker containers
+
+version: '3.8'
+
+services:
+  # Base sandbox service - template for workers
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: octopos-sandbox:latest
+    container_name: octopos-worker-${WORKER_ID:-default}
+    
+    # Security configuration
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:unconfined  # Can be restricted with custom seccomp profile
+    
+    # User configuration (non-root)
+    user: "1000:1000"
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    
+    # Process limits
+    pids_limit: 100
+    
+    # Storage limits
+    storage_opt:
+      size: 1G
+    
+    # Network isolation (no external network)
+    network_mode: none
+    
+    # Mount workspace volume
+    volumes:
+      - type: bind
+        source: ${WORKSPACE_PATH:-./workspace}
+        target: /workspace
+        bind:
+          propagation: rprivate
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 100M
+          noexec: true
+          nosuid: true
+    
+    # Read-only root filesystem with tmpfs for /tmp
+    read_only: true
+    
+    # Environment variables
+    environment:
+      - WORKSPACE_DIR=/workspace
+      - TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-300}
+      - MAX_MEMORY_MB=512
+      - MAX_CPU_CORES=1
+      - PYTHONUNBUFFERED=1
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "echo", "healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "octopos.service,octopos.worker_id"
+    
+    # Labels for identification
+    labels:
+      - "octopos.service=worker"
+      - "octopos.worker_id=${WORKER_ID:-default}"
+      - "octopos.environment=sandbox"
+    
+    # Auto-remove after execution
+    # auto_remove: true  # Uncomment for ephemeral mode
+    
+    # No restart policy (ephemeral workers)
+    restart: "no"
+
+  # Worker pool manager service
+  worker-pool:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: octopos-sandbox:latest
+    container_name: octopos-worker-pool
+    
+    # Runs in daemon mode managing worker lifecycle
+    command: ["/entrypoint.sh", "python3", "-c", "print('Worker pool manager ready')"]
+    
+    # Minimal resources for pool manager
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    
+    # Bridge network for coordination (no external access)
+    networks:
+      - octopos-internal
+    
+    # Access to Docker socket for spawning workers
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+      - type: bind
+        source: ${WORKSPACE_PATH:-./workspace}
+        target: /workspace
+    
+    environment:
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - MAX_WORKERS=10
+      - POOL_MODE=true
+    
+    labels:
+      - "octopos.service=worker-pool"
+      - "octopos.role=manager"
+    
+    # No restart - managed by parent process
+    restart: "no"
+
+  # Test/Debug sandbox (for development)
+  sandbox-debug:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: octopos-sandbox:latest
+    container_name: octopos-sandbox-debug
+    
+    # Interactive shell for debugging
+    stdin_open: true
+    tty: true
+    command: ["/bin/bash"]
+    
+    # Allow network for debugging (remove for production)
+    networks:
+      - octopos-internal
+    
+    volumes:
+      - type: bind
+        source: ${WORKSPACE_PATH:-./workspace}
+        target: /workspace
+      - type: bind
+        source: ./config
+        target: /etc/octopos
+        read_only: true
+    
+    environment:
+      - WORKSPACE_DIR=/workspace
+      - DEBUG=true
+    
+    labels:
+      - "octopos.service=sandbox-debug"
+      - "octopos.role=debug"
+    
+    # Profiles to control which services start by default
+    profiles:
+      - debug
+
+# Internal network for worker coordination
+networks:
+  octopos-internal:
+    driver: bridge
+    internal: true  # No external access
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# Shared volumes
+volumes:
+  workspace:
+    driver: local
+  temp-data:
+    driver: local
