@@ -1,0 +1,118 @@
+# octopOS Production Docker Compose
+# EC2 deployment için production yapılandırması
+
+version: '3.8'
+
+services:
+  # Main octopOS Application
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: octopos:latest
+    container_name: octopos-app
+    hostname: octopos-ec2
+
+    # Restart policy
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    # Resource limits (2 CPU, 8GB RAM sistemi için)
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+
+    # Network configuration
+    ports:
+      - "8080:8080"      # CLI/API port
+      # SSH port removed - use docker exec for container access
+
+    # Environment variables
+    environment:
+      - PYTHONUNBUFFERED=1
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_PROFILE=${AWS_PROFILE:-default}
+      - AGENT_NAME=${AGENT_NAME:-octo}
+      - AGENT_PERSONA=${AGENT_PERSONA:-technical}
+      - USER_WORKSPACE_PATH=${USER_WORKSPACE_PATH:-/workspace}
+      - LANCEDB_PATH=/data/lancedb
+      - TASK_DB_PATH=/data/tasks.db
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DEBUG=${DEBUG:-false}
+
+    # Volume mounts
+    volumes:
+      # Workspace for file operations
+      - ./workspace:/workspace
+      # Data directory for LanceDB and SQLite
+      - octopos-data:/data
+      # Configuration (read-only)
+      - ./config:/config:ro
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # Labels
+    labels:
+      - "app=octopos"
+      - "environment=production"
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # Optional: Redis for caching (future use)
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: octopos-redis
+  #   restart: unless-stopped
+  #   volumes:
+  #     - redis-data:/data
+  #   labels:
+  #     - "app=octopos"
+  #     - "service=redis"
+
+  # Optional: Watchtower for auto-updates
+  # watchtower:
+  #   image: containrrr/watchtower
+  #   container_name: octopos-watchtower
+  #   restart: unless-stopped
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   environment:
+  #     - WATCHTOWER_INTERVAL=3600
+  #   command: --interval 3600 --cleanup
+
+# Networks
+networks:
+  octopos-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
+# Volumes
+volumes:
+  octopos-data:
+    driver: local
+  # redis-data:
+  #   driver: local

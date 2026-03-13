@@ -490,9 +490,10 @@ class TestSensitiveDataMasker:
     def test_mask_slack_token(self):
         """Test masking of Slack tokens."""
         masker = SensitiveDataMasker()
+        # Using fake token format for testing - not a real secret
         text = "Slack token: xoxb-FAKE123456789-FAKE123456789-FAKE123FAKE123FAKE"
         masked = masker.mask(text)
-        assert 'xoxb-FAKE123456789-FAKE123456789' not in masked
+        assert 'xoxb-FAKE' not in masked
         
     def test_mask_github_token(self):
         """Test masking of GitHub tokens."""

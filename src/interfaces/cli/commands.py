@@ -346,6 +346,13 @@ def browse(
         octo browse "go to news.ycombinator.com and get top 10 posts"
         octo browse "find cheapest laptop on amazon" --url https://amazon.com --visible
     """
+    from src.utils.feature_flags import FeatureFlags
+
+    if not FeatureFlags.nova_act_enabled():
+        console.print("[yellow]⚠ Nova Act is not enabled.[/yellow]")
+        console.print("[dim]Set OCTOPOS_FEATURE_NOVA_ACT=true to enable browser automation.[/dim]")
+        raise typer.Exit(1)
+
     from uuid import uuid4
 
     async def run_browser_mission():
@@ -436,6 +443,13 @@ def voice(
         octo voice
         octo voice --lang en-US --wake-word "hey octo"
     """
+    from src.utils.feature_flags import FeatureFlags
+
+    if not FeatureFlags.nova_sonic_enabled():
+        console.print("[yellow]⚠ Nova Sonic is not enabled.[/yellow]")
+        console.print("[dim]Set OCTOPOS_FEATURE_NOVA_SONIC=true to enable voice interface.[/dim]")
+        raise typer.Exit(1)
+
     async def run_voice_session():
         try:
             from src.interfaces.voice.nova_sonic import NovaSonicClient

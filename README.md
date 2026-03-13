@@ -5,6 +5,8 @@
 
 > A self-healing, multi-agent AI operating system with episodic memory, tool synthesis, and omni-channel interfaces.
 
+---
+
 ## 🌟 Overview
 
 octopOS is a sophisticated AI agent operating system designed to autonomously handle complex tasks through a coordinated network of specialized agents. It features a unique self-healing capability where the system can generate, test, and deploy new tools (primitives) on-demand when existing capabilities are insufficient.
@@ -15,7 +17,7 @@ octopOS is a sophisticated AI agent operating system designed to autonomously ha
 - **🧠 Multi-Layer Memory System**: Short-term working memory, long-term semantic memory with decay
 - **👥 Multi-Agent Coordination**: Manager, Coder, Self-Healing, and Supervisor agents
 - **🐳 Ephemeral Workers**: Docker-based isolated execution environments
-- **📱 Omni-Channel**: CLI, Telegram, Slack, WhatsApp, and voice interfaces
+- **📱 Omni-Channel**: CLI, Telegram, Slack, WhatsApp, and voice interfaces (feature-flagged)
 - **🛡️ Security-First**: Bedrock Guardrails, code scanning, approval workflows
 - **☁️ AWS-Native**: EventBridge, CloudWatch, Bedrock, DynamoDB integration
 
@@ -88,20 +90,19 @@ octopOS/
 │   ├── engine/              # Core orchestration & messaging
 │   │   ├── base_agent.py    # Abstract base for all agents
 │   │   ├── orchestrator.py  # Main Brain
-│   │   ├── workflow_integration.py  # Complete workflow orchestration
 │   │   ├── supervisor.py    # Security & approval
 │   │   ├── message.py       # OctoMessage protocol
 │   │   └── memory/          # Memory subsystems
-│   │       ├── semantic_memory.py    # Long-term memory with decay
-│   │       ├── intent_finder.py      # Tool discovery
-│   │       ├── fact_extractor.py     # User fact extraction
-│   │       └── working_memory.py     # Short-term context
+│   │       ├── semantic_memory.py
+│   │       ├── intent_finder.py
+│   │       ├── fact_extractor.py
+│   │       └── working_memory.py
 │   │
 │   ├── specialist/          # Specialist agents
-│   │   ├── manager_agent.py          # Agent coordination
-│   │   ├── coder_agent.py            # Code generation
-│   │   ├── self_healing_agent.py     # Error recovery
-│   │   └── browser_agent.py          # Web automation
+│   │   ├── manager_agent.py
+│   │   ├── coder_agent.py
+│   │   ├── self_healing_agent.py
+│   │   └── browser_agent.py
 │   │
 │   ├── workers/             # Ephemeral execution layer
 │   │   ├── base_worker.py
@@ -119,25 +120,28 @@ octopOS/
 │   │
 │   ├── interfaces/          # User interfaces
 │   │   ├── cli/             # Command-line interface
-│   │   ├── telegram/        # Telegram bot
-│   │   ├── slack/           # Slack integration
-│   │   ├── whatsapp/        # WhatsApp Business API
-│   │   ├── voice/           # Nova Sonic voice
-│   │   └── ui/              # Nova Act UI automation
+│   │   ├── telegram/        # Telegram bot (optional)
+│   │   ├── slack/           # Slack integration (optional)
+│   │   ├── whatsapp/        # WhatsApp Business API (optional)
+│   │   ├── voice/           # Nova Sonic voice (optional)
+│   │   └── ui/              # Nova Act UI automation (optional)
 │   │
 │   ├── tasks/               # Task queue & scheduling
-│   │   └── task_queue.py    # OctoQueue implementation
+│   │   └── task_queue.py
 │   │
 │   └── utils/               # Utilities
-│       ├── config.py        # Configuration management
-│       ├── bedrock_guardrails.py  # Content safety
-│       ├── cloudwatch_logger.py   # AWS logging
-│       ├── aws_eventbridge.py     # Serverless scheduling
-│       └── token_budget.py        # Cost management
+│       ├── config.py
+│       ├── feature_flags.py # Feature flag system
+│       ├── bedrock_guardrails.py
+│       ├── cloudwatch_logger.py
+│       └── token_budget.py
+│
+├── deploy/                  # Deployment configurations
+│   ├── docker-compose.prod.yml
+│   └── Dockerfile
 │
 ├── sandbox/                 # Docker sandbox configuration
 ├── data/                    # Local data storage
-│   └── lancedb/            # Vector database
 └── tests/                   # Test suite
 ```
 
@@ -155,7 +159,7 @@ octopOS/
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/octopos.git
+git clone https://github.com/gnyselcuk/octopos.git
 cd octopos
 
 # Install dependencies
@@ -165,8 +169,8 @@ pip install -e ".[dev]"
 cp .env.example .env
 # Edit .env with your settings
 
-# Initialize the system
-octo init
+# Run setup wizard
+octo setup
 ```
 
 ### Basic Usage
@@ -179,10 +183,30 @@ octo chat
 octo ask "List all files in the current directory"
 
 # Check system status
-octo status
+octo agent-status
 
 # Check budget usage
 octo budget
+```
+
+---
+
+## 🎛️ Feature Flags
+
+octopOS uses feature flags to enable/disable optional components:
+
+| Feature | Environment Variable | Default |
+|---------|---------------------|---------|
+| Slack | `OCTOPOS_FEATURE_SLACK` | `false` |
+| WhatsApp | `OCTOPOS_FEATURE_WHATSAPP` | `false` |
+| Telegram | `OCTOPOS_FEATURE_TELEGRAM` | `false` |
+| Nova Act | `OCTOPOS_FEATURE_NOVA_ACT` | `false` |
+| Nova Sonic | `OCTOPOS_FEATURE_NOVA_SONIC` | `false` |
+
+Enable a feature:
+```bash
+export OCTOPOS_FEATURE_NOVA_ACT=true
+octo browse "search for something"
 ```
 
 ---
@@ -235,8 +259,6 @@ flowchart LR
 Importance Score = (access_count * weight) - (days_since_last_access * decay_rate)
 ```
 
-See: [`src/engine/memory/semantic_memory.py`](src/engine/memory/semantic_memory.py:367)
-
 ### 3. Worker System
 
 Ephemeral Docker containers for isolated task execution:
@@ -265,8 +287,6 @@ sequenceDiagram
     EW-->>MA: Task complete
     MA->>WP: Release worker
 ```
-
-See: [`src/workers/`](src/workers/)
 
 ### 4. Workflow Integration
 
@@ -302,8 +322,6 @@ sequenceDiagram
     MB-->>User: Task complete
 ```
 
-See: [`src/engine/workflow_integration.py`](src/engine/workflow_integration.py)
-
 ### 5. Security & Guardrails
 
 ```mermaid
@@ -335,16 +353,33 @@ flowchart TB
     AV --> Manual
 ```
 
-See: [`src/utils/bedrock_guardrails.py`](src/utils/bedrock_guardrails.py), [`src/engine/supervisor.py`](src/engine/supervisor.py)
-
 ---
 
-## 📚 Documentation
+## 🐳 Deployment
 
-- [Architecture Documentation](docs/ARCHITECTURE.md) - Detailed system architecture
-- [API Reference](docs/API.md) - API documentation
-- [Development Guide](docs/DEVELOPMENT.md) - Contributing guidelines
-- [Deployment Guide](docs/DEPLOYMENT.md) - Production deployment
+### Docker Compose (Production)
+
+```bash
+# Start services
+cd deploy
+docker-compose -f docker-compose.prod.yml up -d
+
+# View logs
+docker-compose -f docker-compose.prod.yml logs -f
+
+# Stop services
+docker-compose -f docker-compose.prod.yml down
+```
+
+### Environment Variables
+
+See [`.env.example`](.env.example) for all available configuration options.
+
+Key variables:
+- `AWS_REGION` - AWS region for Bedrock
+- `OCTO_AGENT_NAME` - Agent name
+- `OCTO_AGENT_PERSONA` - Agent personality (friendly/professional/technical)
+- `LOG_LEVEL` - Logging level (DEBUG/INFO/WARNING/ERROR)
 
 ---
 
@@ -364,6 +399,52 @@ pytest tests/integration/
 
 ---
 
+## 🛠️ Development
+
+### Pre-commit Hooks
+
+```bash
+# Install pre-commit
+pip install pre-commit
+pre-commit install
+
+# Run manually
+pre-commit run --all-files
+```
+
+### Creating a Custom Primitive
+
+```python
+from src.primitives.base_primitive import BasePrimitive, PrimitiveResult
+
+class MyTool(BasePrimitive):
+    @property
+    def name(self) -> str:
+        return "my_tool"
+
+    @property
+    def description(self) -> str:
+        return "Does something useful"
+
+    async def execute(self, **params) -> PrimitiveResult:
+        # Implementation
+        return PrimitiveResult(
+            success=True,
+            data={"result": "done"},
+            message="Success"
+        )
+```
+
+---
+
+## 📚 Additional Documentation
+
+- [Architecture Plan](architecture_plan.md) - System architecture and design
+- [Deployment Cleanup Plan](plans/deployment_cleanup_plan.md) - Deployment cleanup details
+- [EC2 Test Runbook](EC2_TEST_RUNBOOK.md) - EC2 deployment testing
+
+---
+
 ## 📜 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -372,7 +453,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please read our [Contributing Guide](docs/CONTRIBUTING.md) for details.
+Contributions are welcome! Please ensure:
+1. Code follows the existing style (use pre-commit hooks)
+2. Tests pass (`pytest`)
+3. Documentation is updated for any changes
 
 ---
 

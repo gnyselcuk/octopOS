@@ -62,14 +62,10 @@ from src.primitives.mcp_adapter.mcp_transport import MCPMessage
 from src.primitives.dev.ast_parser import ASTParser
 from src.primitives.dev.git_manipulator import GitManipulator
 
-# Legacy imports for backward compatibility
-from src.primitives.aws_operations import (
-    S3UploadPrimitive,
-    S3DownloadPrimitive,
-    S3ListPrimitive,
-    BedrockInvokePrimitive,
-    DynamoDBGetItemPrimitive,
-)
+# Legacy imports removed - use cloud_aws module instead
+# from src.primitives.cloud_aws.s3_manager import S3Manager
+# from src.primitives.cloud_aws.bedrock_invoker import BedrockInvoker
+# from src.primitives.cloud_aws.dynamodb_client import DynamoDBClient
 
 __all__ = [
     # Base classes
@@ -119,13 +115,6 @@ __all__ = [
     # Developer tools primitives
     "ASTParser",
     "GitManipulator",
-    
-    # Legacy AWS primitives (backward compatibility)
-    "S3UploadPrimitive",
-    "S3DownloadPrimitive",
-    "S3ListPrimitive",
-    "BedrockInvokePrimitive",
-    "DynamoDBGetItemPrimitive",
 ]
 
 
@@ -153,9 +142,8 @@ def register_all() -> None:
     
     # Legacy primitives (for backward compatibility)
     from src.primitives.file_operations import register_all as register_file_ops
-    from src.primitives.aws_operations import register_all as register_aws_ops
     register_file_ops()
-    register_aws_ops()
+    # Legacy aws_operations removed - use cloud_aws module instead
 
 
 # Auto-register on import (for backward compatibility)

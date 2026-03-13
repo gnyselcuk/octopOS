@@ -507,6 +507,58 @@ class TaskQueue:
         finally:
             conn.close()
     
+    def list_tasks(
+        self,
+        state: Optional[TaskState] = None,
+        agent_type: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Task]:
+        """List tasks with optional filtering.
+        
+        Args:
+            state: Filter by task state
+            agent_type: Filter by agent type
+            limit: Maximum number of tasks to return
+            offset: Number of tasks to skip
+            
+        Returns:
+            List of tasks matching the filters
+        """
+        self.initialize()
+        
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Build query dynamically based on filters
+            conditions = []
+            params = []
+            
+            if state:
+                conditions.append("state = ?")
+                params.append(state.value)
+            
+            if agent_type:
+                conditions.append("agent_type = ?")
+                params.append(agent_type)
+            
+            # Construct the query
+            query = "SELECT * FROM tasks"
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            
+            query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+            
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            
+            return [self._row_to_task(row) for row in rows]
+            
+        finally:
+            conn.close()
+    
     def get_task_stats(self) -> Dict[str, Any]:
         """Get task queue statistics.
         
