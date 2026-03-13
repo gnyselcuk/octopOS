@@ -17,10 +17,12 @@ Example:
     ... )
 """
 
+from __future__ import annotations
+
 import ast
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Union
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -302,7 +304,7 @@ class ASTParser(BasePrimitive):
     
     def _extract_function_info(
         self,
-        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        node: Union[ast.FunctionDef, ast.AsyncFunctionDef],
         is_method: bool = False
     ) -> FunctionInfo:
         """Extract function information."""
@@ -341,7 +343,7 @@ class ASTParser(BasePrimitive):
             is_async=isinstance(node, ast.AsyncFunctionDef)
         )
     
-    def _extract_import_info(self, node: ast.Import | ast.ImportFrom) -> Dict:
+    def _extract_import_info(self, node: Union[ast.Import, ast.ImportFrom]) -> Dict:
         """Extract import information."""
         if isinstance(node, ast.Import):
             return {
