@@ -1,44 +1,44 @@
-# octopOS - Mimari Tamamlayıcı Notlar (Advanced Considerations)
+# octopOS - Architecture Supplementary Notes (Advanced Considerations)
 
-Bu döküman, `architecture_plan.md` dosyasındaki temel mimariyi güçlendirmek ve kodlama aşamasına geçmeden önce dikkat edilmesi gereken kritik operasyonel detayları içerir.
+This document contains critical operational details that strengthen the basic architecture in the `architecture_plan.md` file and should be considered before moving to the coding phase.
 
-## 1. Güvenlik ve İzolasyon (Deep-Dive)
+## 1. Security and Isolation (Deep-Dive)
 
-Ajanların otonom kod yazıp çalıştırdığı bir sistemde güvenlik, "opsiyonel" değil "zorunluluktur".
+In a system where agents autonomously write and execute code, security is not "optional" but "mandatory".
 
-- **Network Isolation:** Worker container'lar `--network none` ile başlatılmalı veya sadece AWS API endpointlerine izin veren bir egress firewall (örn: AWS Network Firewall veya Security Group) arkasında tutulmalıdır.
-- **Secrets Management:** Ajanların `.env` dosyalarını okuması yerine, `src/utils/aws_utils.py` üzerinden **AWS Secrets Manager** veya **Parameter Store** entegrasyonu ile "runtime-only" yetki alması sağlanmalıdır.
-- **Resource Constraints:** Her Docker container için CPU ve RAM limitleri (örn: `mem_limit="512m"`, `cpu_period=100000`) kesinlikle tanımlanmalıdır.
+- **Network Isolation:** Worker containers should be launched with `--network none` or kept behind an egress firewall (e.g., AWS Network Firewall or Security Group) that only allows AWS API endpoints.
+- **Secrets Management:** Instead of agents reading `.env` files, **AWS Secrets Manager** or **Parameter Store** integration should be provided through `src/utils/aws_utils.py` for "runtime-only" credential access.
+- **Resource Constraints:** CPU and RAM limits (e.g., `mem_limit="512m"`, `cpu_period=100000`) must be strictly defined for each Docker container.
 
-## 2. Maliyet ve Token Kontrolü (Budgeting)
+## 2. Cost and Token Control (Budgeting)
 
-Nova modelleri (özellikle Act ve Pro) yoğun kullanımda maliyetli olabilir.
+Nova models (especially Act and Pro) can be costly under heavy usage.
 
-- **Token Counting:** Her `OctoMessage` alışverişinde kullanılan token miktarı loglanmalı ve bir "Session Budget" (oturum bütçesi) tutulmalıdır.
-- **Stop-Loss Mekanizması:** Eğer bir task tahmini 5$ maliyeti aşıyorsa, **Supervisor** işlemi durdurmalı ve kullanıcıdan onay almalıdır.
-- **Cache Layer:** Benzer talepler için LLM'e gitmek yerine, LanceDB üzerinde "Semantic Cache" kullanılarak maliyet %30-40 oranında düşürülebilir.
+- **Token Counting:** The token amount used in each `OctoMessage` exchange should be logged and a "Session Budget" should be maintained.
+- **Stop-Loss Mechanism:** If a task is estimated to exceed $5 in cost, the **Supervisor** should stop the operation and get approval from the user.
+- **Cache Layer:** For similar requests, instead of going to the LLM, using "Semantic Cache" on LanceDB can reduce costs by 30-40%.
 
-## 3. Gözlemlenebilirlik (Observability & Tracing)
+## 3. Observability (Observability & Tracing)
 
-Asenkron ve çok ajanlı sistemlerde hata ayıklama (debugging) kabustur.
+Debugging in asynchronous and multi-agent systems is a nightmare.
 
-- **Trace ID:** Her kullanıcı isteği bir `trace_id` ile başlar. Tüm alt ajan mesajları (OctoMessage) bu ID'yi taşır.
-- **Centralized Logging:** Tüm loglar `(timestamp, level, agent_name, trace_id, message)` formatında AWS **CloudWatch**'a gönderilmelidir.
-- **State Visualization:** `octo status --trace` komutu ile bir görevin hangi ajanlarda takıldığı görselleştirilmelidir.
+- **Trace ID:** Each user request starts with a `trace_id`. All sub-agent messages (OctoMessage) carry this ID.
+- **Centralized Logging:** All logs should be sent to AWS **CloudWatch** in `(timestamp, level, agent_name, trace_id, message)` format.
+- **State Visualization:** The `octo status --trace` command should visualize which agents a task is stuck on.
 
-## 4. Çoklu Kullanıcı ve Veri İzolasyonu
+## 4. Multi-User and Data Isolation
 
-Eğer sistem Telegram/Slack üzerinden birden fazla kullanıcıya hizmet verecekse:
+If the system will serve multiple users via Telegram/Slack:
 
-- **Tenant Isolation:** Her kullanıcının kendi LanceDB tablosu veya namespace'i olmalıdır.
-- **Context Switching:** Main Brain, `sender_id` bazlı olarak bellekten doğru profili yüklemelidir.
+- **Tenant Isolation:** Each user should have their own LanceDB table or namespace.
+- **Context Switching:** Main Brain should load the correct profile from memory based on `sender_id`.
 
-## 5. Hata Kurtarma (Global Error Recovery)
+## 5. Error Recovery (Global Error Recovery)
 
-- **Brain Freeze:** Eğer Main Brain (Orkestratör) beklenmedik bir hata alırsa, sistemin "Safe Mode" (Güvenli Mod) içinde uyanması ve son başarılı state'den devam etmesi (Check-pointing) gerekir.
-- **Dead Letter Queue (DLQ):** İşlenemeyen mesajlar bir DLQ'da toplanmalı ve **Self-Healing Agent** bu kuyruğu periyodik olarak analiz etmelidir.
+- **Brain Freeze:** If Main Brain (Orchestrator) encounters an unexpected error, the system should wake up in "Safe Mode" and continue from the last successful state (Check-pointing).
+- **Dead Letter Queue (DLQ):** Unprocessable messages should be collected in a DLQ and **Self-Healing Agent** should periodically analyze this queue.
 
-## 6. Geliştirme ve CI/CD Stratejisi
+## 6. Development and CI/CD Strategy
 
-- **Local Mocking:** Geliştirme sırasında maliyeti düşürmek için Bedrock yerine yerel bir `MockBedrock` sınıfı kullanılmalıdır.
-- **Agentic Testing:** Sistemin kendi yazdığı `primitives`'ler için otomatik bir "Sandbox Unit Test" katmanı olmalıdır. Testten geçmeyen hiçbir kod `src/primitives/` altına taşınmamalıdır.
+- **Local Mocking:** To reduce costs during development, a local `MockBedrock` class should be used instead of Bedrock.
+- **Agentic Testing:** There should be an automatic "Sandbox Unit Test" layer for the `primitives` written by the system itself. No code that doesn't pass the test should be moved under `src/primitives/`.
