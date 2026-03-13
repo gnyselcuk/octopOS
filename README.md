@@ -439,9 +439,8 @@ class MyTool(BasePrimitive):
 
 ## 📚 Additional Documentation
 
-- [Architecture Plan](architecture_plan.md) - System architecture and design
-- [Deployment Cleanup Plan](plans/deployment_cleanup_plan.md) - Deployment cleanup details
-- [EC2 Test Runbook](EC2_TEST_RUNBOOK.md) - EC2 deployment testing
+- [Architecture Plan](architecture_plan.md) - System architecture and design decisions
+- [Architecture Supplement](architecture_supplement.md) - Additional architectural details
 
 ---
 
