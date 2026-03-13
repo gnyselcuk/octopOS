@@ -107,7 +107,7 @@ class UserConfig:
 @dataclass
 class LanceDBConfig:
     """LanceDB vector store configuration."""
-    path: str = "./data/lancedb"
+    path: str = "~/.octopos/data/lancedb"
     table_primitives: str = "primitives"
     table_memory: str = "memory"
     table_public_apis: str = "public_apis"
@@ -123,7 +123,7 @@ class LoggingConfig:
     cloudwatch_log_stream: str = "default"
     
     # File rotation settings
-    file_path: str = "./logs/octopos.log"
+    file_path: str = "~/.octopos/logs/octopos.log"
     file_max_bytes: int = 10 * 1024 * 1024  # 10MB
     file_backup_count: int = 5
     
@@ -140,7 +140,7 @@ class LoggingConfig:
 @dataclass
 class TaskConfig:
     """Task queue configuration."""
-    db_path: str = "./data/tasks.db"
+    db_path: str = "~/.octopos/data/tasks.db"
     db_type: str = "sqlite"  # sqlite or dynamodb
     dynamodb_table_tasks: str = "octopos-tasks"
     dynamodb_table_schedule: str = "octopos-schedule"

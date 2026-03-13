@@ -24,7 +24,7 @@ class APIIndex:
             json_path: Path to the JSON file containing API definitions
         """
         self._config = get_config()
-        self._json_path = json_path or "./data/config/public_apis.json"
+        self._json_path = json_path or "~/.octopos/data/config/public_apis.json"
         self._db_path = self._config.lancedb.path
         self._table_name = self._config.lancedb.table_public_apis
         self._bedrock_client = None

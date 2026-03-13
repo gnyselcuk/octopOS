@@ -458,12 +458,12 @@ def doctor() -> None:
     
     # Check 4: Data directories
     console.print("[dim]Checking data directories...[/dim]")
-    data_dir = Path("./data")
+    data_dir = Path.home() / ".octopos" / "data"
     if not data_dir.exists():
         data_dir.mkdir(parents=True, exist_ok=True)
-        console.print(f"  [green]✓[/green] Created data directory")
+        console.print(f"  [green]✓[/green] Created data directory: {data_dir}")
     else:
-        console.print(f"  [green]✓[/green] Data directory exists")
+        console.print(f"  [green]✓[/green] Data directory exists: {data_dir}")
     
     # Check 5: Dependencies
     console.print("[dim]Checking dependencies...[/dim]")
