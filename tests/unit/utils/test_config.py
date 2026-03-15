@@ -20,7 +20,7 @@ from src.utils.config import (
     LogLevel,
     LoggingConfig,
     MCPConfig,
-    MCPConfig,
+    MCPServerConfig,
     OctoConfig,
     SecurityConfig,
     TaskConfig,
@@ -170,9 +170,11 @@ class TestConfigLoader:
         """Create config loader."""
         return ConfigLoader()
     
-    def test_load_default_config(self, loader):
+    @patch.dict(os.environ, {}, clear=True)
+    def test_load_default_config(self, loader, tmp_path):
         """Test loading default configuration."""
-        config = loader.load()
+        with patch('pathlib.Path.home', return_value=tmp_path):
+            config = loader.load()
         
         assert isinstance(config, OctoConfig)
         assert config.aws.region == "us-east-1"
@@ -254,6 +256,25 @@ user:
         assert "us-west-2" in content
         assert "SavedAgent" in content
 
+    def test_save_profile_persists_mcp_env_when_requested(self, loader, tmp_path):
+        """MCP env values can be persisted for interactive market installs."""
+        config = OctoConfig()
+        config.mcp.servers["github"] = MCPServerConfig(
+            name="github",
+            transport="stdio",
+            command="npx",
+            args=["-y", "server"],
+            env={"GITHUB_TOKEN": "secret"},
+        )
+
+        profile_path = tmp_path / "profile.yaml"
+
+        loader.save_profile(config, profile_path, persist_mcp_env=True)
+
+        content = profile_path.read_text()
+        assert "GITHUB_TOKEN" in content
+        assert "secret" in content
+
 
 class TestGetConfig:
     """Test get_config function."""
@@ -277,25 +298,22 @@ class TestLoadSaveConfig:
     
     def test_load_config(self):
         """Test load_config convenience function."""
-        with patch('src.utils.config.get_config') as mock_get:
+        with patch('src.utils.config._config_loader') as mock_loader:
             mock_config = MagicMock()
-            mock_get.return_value = mock_config
-            
+            mock_loader.load.return_value = mock_config
+
             result = load_config()
-            
-            assert result == mock_config
+
+        assert result == mock_config
     
     def test_save_config(self, tmp_path):
         """Test save_config convenience function."""
         config = OctoConfig()
-        
-        with patch('src.utils.config.ConfigLoader') as mock_loader_class:
-            mock_loader = MagicMock()
-            mock_loader_class.return_value = mock_loader
-            
+
+        with patch('src.utils.config._config_loader') as mock_loader:
             save_config(config)
-            
-            mock_loader.save_profile.assert_called_once_with(config, None)
+
+        mock_loader.save_profile.assert_called_once_with(config, persist_mcp_env=False)
 
 
 class TestOctoConfig:

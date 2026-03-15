@@ -256,7 +256,8 @@ class MCPManager:
             elif server.transport == "sse":
                 await self.add_server_sse(
                     name=server.name,
-                    url=server.url
+                    url=server.url,
+                    headers=server.headers
                 )
     
     async def add_server_stdio(

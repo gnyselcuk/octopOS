@@ -179,6 +179,7 @@ class MCPServerConfig:
     args: List[str] = field(default_factory=list)
     env: Dict[str, str] = field(default_factory=dict)
     url: Optional[str] = None
+    headers: Dict[str, str] = field(default_factory=dict)
     enabled: bool = True
 
 
@@ -448,7 +449,12 @@ class ConfigLoader:
         
         return config
     
-    def save_profile(self, config: OctoConfig, profile_path: Optional[Path] = None) -> None:
+    def save_profile(
+        self,
+        config: OctoConfig,
+        profile_path: Optional[Path] = None,
+        persist_mcp_env: bool = False,
+    ) -> None:
         """Save configuration to user profile file.
         
         SECURITY: This method never saves sensitive credentials to the profile file.
@@ -479,10 +485,11 @@ class ConfigLoader:
         if config.web.brave_api_key:
             sensitive_fields.append("BRAVE_API_KEY")
         
-        # Check MCP servers for env vars with secrets
-        for name, server in config.mcp.servers.items():
-            if server.env:
-                sensitive_fields.append(f"MCP server '{name}' env vars")
+        if not persist_mcp_env:
+            # Check MCP servers for env vars with secrets
+            for name, server in config.mcp.servers.items():
+                if server.env:
+                    sensitive_fields.append(f"MCP server '{name}' env vars")
         
         if sensitive_fields:
             warnings.warn(
@@ -499,8 +506,9 @@ class ConfigLoader:
                 'transport': s.transport,
                 'command': s.command,
                 'args': s.args,
-                # NEVER save 'env' - it may contain credentials
+                'env': s.env if persist_mcp_env else {},
                 'url': s.url,
+                'headers': s.headers,
                 'enabled': s.enabled
             }
         
@@ -578,10 +586,11 @@ def load_config() -> OctoConfig:
     return _config_loader.load()
 
 
-def save_config(config: OctoConfig) -> None:
+def save_config(config: OctoConfig, persist_mcp_env: bool = False) -> None:
     """Save configuration to user profile.
     
     Args:
         config: Configuration to save
+        persist_mcp_env: Persist MCP env values in profile for interactive MCP installs
     """
-    _config_loader.save_profile(config)
+    _config_loader.save_profile(config, persist_mcp_env=persist_mcp_env)
