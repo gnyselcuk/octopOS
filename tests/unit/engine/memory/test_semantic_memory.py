@@ -217,24 +217,19 @@ class TestSemanticMemoryRetrieval:
         
         # Mock table with search results
         mem._table = MagicMock()
-        mock_results = MagicMock()
-        mock_df = MagicMock()
-        mock_df.iterrows.return_value = [
-            (0, {
-                "id": "fact_1",
-                "content": "User lives in Istanbul",
-                "category": "fact",
-                "timestamp": "2024-01-01",
-                "source": "conversation",
-                "confidence": 0.9,
-                "metadata": json.dumps({"user_id": "123"}),
-                "access_count": 1,
-                "last_accessed": "2024-01-01",
-                "_distance": 0.1
-            })
-        ]
-        mock_results.to_pandas.return_value = mock_df
-        mem._table.search.return_value.limit.return_value.to_pandas.return_value = mock_df
+        rows = [{
+            "id": "fact_1",
+            "content": "User lives in Istanbul",
+            "category": "fact",
+            "timestamp": "2024-01-01",
+            "source": "conversation",
+            "confidence": 0.9,
+            "metadata": json.dumps({"user_id": "123"}),
+            "access_count": 1,
+            "last_accessed": "2024-01-01",
+            "_distance": 0.1,
+        }]
+        mem._table.search.return_value.limit.return_value.to_arrow.return_value.to_pylist.return_value = rows
         
         return mem
     
@@ -262,14 +257,12 @@ class TestSemanticMemoryRetrieval:
         memory._bedrock_client.invoke_model.return_value = mock_response
         
         # Mock search chain - LanceDB API: search().limit() or search().where().limit()
-        mock_df = MagicMock()
-        mock_df.iterrows.return_value = []
-        
         mock_limit = MagicMock()
-        mock_limit.to_pandas.return_value = mock_df
+        mock_limit.to_arrow.return_value.to_pylist.return_value = []
         
         mock_search = MagicMock()
         mock_search.limit.return_value = mock_limit
+        mock_search.where.return_value.limit.return_value = mock_limit
         
         memory._table.search.return_value = mock_search
         
@@ -287,11 +280,9 @@ class TestSemanticMemoryRetrieval:
         memory._bedrock_client.invoke_model.return_value = mock_response
         
         # Mock with high distance (low similarity)
-        mock_df = MagicMock()
-        mock_df.iterrows.return_value = [
-            (0, {"_distance": 0.9})  # Very low similarity
+        memory._table.search.return_value.limit.return_value.to_arrow.return_value.to_pylist.return_value = [
+            {"_distance": 0.9}  # Very low similarity
         ]
-        memory._table.search.return_value.limit.return_value.to_pandas.return_value = mock_df
         
         results = await memory.recall("test", min_score=0.8)
         
@@ -354,12 +345,19 @@ class TestSemanticMemorySchemaMigration:
     async def test_migrate_schema_adds_columns(self, memory):
         """Test schema migration adds missing columns."""
         # Mock old table data without access_count and last_accessed
-        mock_old_df = MagicMock()
-        mock_old_df.columns = ["id", "content", "category"]  # Missing new columns
-        mock_old_df.__len__ = MagicMock(return_value=10)
+        mock_old_rows = [{
+            "id": "fact_1",
+            "content": "User likes Python",
+            "category": "preference",
+            "timestamp": "2024-01-01T00:00:00",
+            "source": "conversation",
+            "confidence": 0.9,
+            "vector": [0.1] * 1024,
+            "metadata": json.dumps({"source": "test"}),
+        }]
         
         mock_old_table = MagicMock()
-        mock_old_table.to_pandas.return_value = mock_old_df
+        mock_old_table.to_arrow.return_value.to_pylist.return_value = mock_old_rows
         memory._table = mock_old_table
         
         await memory._migrate_schema("test_memory")

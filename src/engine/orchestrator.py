@@ -8,11 +8,16 @@ This module implements the Main Brain agent that:
 """
 
 import json
+import re
+from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 
 from src.engine.base_agent import BaseAgent
+from src.engine.dead_letter_queue import get_dead_letter_queue
 from src.engine.message import (
+    AgentContext,
     ApprovalPayload,
     ErrorPayload,
     ErrorSeverity,
@@ -87,6 +92,21 @@ class SubTask:
         self.result: Optional[Dict[str, Any]] = None
 
 
+@dataclass
+class QueryState:
+    """Runtime state for a single query orchestration loop."""
+
+    original_query: str
+    requires_multi_source: bool
+    successful_tool_outputs: List[Dict[str, Any]] = field(default_factory=list)
+    tool_failures: List[Dict[str, Any]] = field(default_factory=list)
+    repeated_failures: Dict[str, int] = field(default_factory=dict)
+    last_tool_args: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    last_successful_tool_args: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    entity_memory: Dict[str, Any] = field(default_factory=dict)
+    consecutive_failures: int = 0
+
+
 class Orchestrator(BaseAgent):
     """Main Brain - Central orchestrator for octopOS.
     
@@ -104,6 +124,14 @@ class Orchestrator(BaseAgent):
         ...     "Create a Python script that uploads files to S3"
         ... )
     """
+
+    _MAX_TOOL_TURNS = 10
+    _MAX_TOOL_STRING_CHARS = 2000
+    _MAX_TOOL_COLLECTION_ITEMS = 10
+    _MAX_TOOL_NESTING_DEPTH = 4
+    _MAX_CONSECUTIVE_TOOL_FAILURES = 3
+    _MAX_REPEATED_TOOL_FAILURES = 2
+    _HIGH_CONFIDENCE_DIRECT_ANSWER = 0.9
     
     def __init__(self, context: Optional[Any] = None) -> None:
         """Initialize the Orchestrator.
@@ -388,6 +416,13 @@ Respond with a JSON object containing:
         system_prompt = self._config.agent.get_system_prompt()
         if memory_context:
             system_prompt += f"\n\nHere is relevant context from your memory about the user and past interactions:\n{memory_context}\nUse this context when relevant, but don't explicitly mention 'my memory says...', just use the info naturally."
+        system_prompt += (
+            "\n\nWhen using tools for a query:"
+            "\n- Start with the most direct data source, but if a tool errors or returns insufficient data, form a new plan and try a different tool path."
+            "\n- Do not repeat the same failing tool call with the same arguments."
+            "\n- If the curated public API catalog is unavailable or a selected API path fails, pivot to search and extraction from alternative sources."
+            "\n- Prefer concise final answers and never expose hidden reasoning, scratchpads, or <thinking> tags."
+        )
             
         messages = []
         
@@ -405,12 +440,15 @@ Respond with a JSON object containing:
                 "content": [{"text": user_input}]
             })
         
+        query_state = self._initialize_query_state(user_input)
+        prefer_direct_answer = not query_state.requires_multi_source
+
         try:
             # Single-turn tool usage loop
-            for _ in range(10): # Max 10 turns for complex reasoning
+            for _ in range(self._MAX_TOOL_TURNS):  # Max turns for complex reasoning
                 response = self._bedrock_client.converse(
                     modelId=self._config.aws.model_nova_pro,
-                    system=[{"text": self._config.agent.get_system_prompt()}],
+                    system=[{"text": system_prompt}],
                     messages=messages,
                     toolConfig={"tools": tools}
                 )
@@ -428,15 +466,81 @@ Respond with a JSON object containing:
                             tool_use = content['toolUse']
                             tool_name = tool_use['name']
                             tool_id = tool_use['toolUseId']
-                            tool_args = tool_use['input']
+                            tool_args = self._prepare_tool_args(
+                                query_state,
+                                tool_name,
+                                tool_use['input'],
+                            )
                             
                             self.agent_logger.info(f"Executing tool: {tool_name}")
                             result = await registry.execute_tool(tool_name, **tool_args)
+                            compact_result = self._compact_tool_result(result)
+                            self._update_query_state_entities(
+                                query_state,
+                                tool_name,
+                                tool_args,
+                                compact_result,
+                            )
+
+                            if result.success:
+                                query_state.consecutive_failures = 0
+                                answer_candidate = self._extract_answer_candidate(tool_name, compact_result)
+                                query_state.successful_tool_outputs.append({
+                                    "tool": tool_name,
+                                    "args": self._compact_tool_data(tool_args),
+                                    "result": compact_result,
+                                    "answer_candidate": answer_candidate,
+                                })
+                                query_state.last_successful_tool_args[tool_name] = deepcopy(tool_args)
+
+                                if (
+                                    prefer_direct_answer
+                                    and answer_candidate
+                                    and answer_candidate.get("confidence", 0.0) >= self._HIGH_CONFIDENCE_DIRECT_ANSWER
+                                ):
+                                    return {
+                                        "status": "success",
+                                        "intent": "query",
+                                        "response": answer_candidate["text"],
+                                    }
+                            else:
+                                query_state.consecutive_failures += 1
+                                failure = {
+                                    "tool": tool_name,
+                                    "args": self._compact_tool_data(tool_args),
+                                    "error": getattr(result, 'error', None),
+                                    "message": getattr(result, 'message', 'Tool execution failed'),
+                                }
+                                query_state.tool_failures.append(failure)
+
+                                failure_signature = json.dumps(
+                                    {"tool": tool_name, "args": tool_args},
+                                    sort_keys=True,
+                                    default=str
+                                )
+                                query_state.repeated_failures[failure_signature] = (
+                                    query_state.repeated_failures.get(failure_signature, 0) + 1
+                                )
+
+                                if (
+                                    query_state.consecutive_failures >= self._MAX_CONSECUTIVE_TOOL_FAILURES
+                                    or query_state.repeated_failures[failure_signature] >= self._MAX_REPEATED_TOOL_FAILURES
+                                ):
+                                    return await self._handle_query_failure(
+                                        user_input=user_input,
+                                        error_type="RepeatedToolFailures",
+                                        error_message="Multiple tool attempts failed without producing a usable answer",
+                                        failure_context={
+                                            "intent": intent.description,
+                                            "tool_failures": query_state.tool_failures,
+                                            "last_tool": tool_name,
+                                        }
+                                    )
                             
                             tool_results.append({
                                 "toolResult": {
                                     "toolUseId": tool_id,
-                                    "content": [{"json": result.to_dict() if hasattr(result, 'to_dict') else {"success": result.success, "data": result.data, "message": result.message}}],
+                                    "content": [{"json": compact_result}],
                                     "status": "success" if result.success else "error"
                                 }
                             })
@@ -451,6 +555,10 @@ Respond with a JSON object containing:
                     for content in output_msg['content']:
                         if 'text' in content:
                             response_text += content['text']
+                    response_text = self._finalize_query_response(
+                        response_text,
+                        query_state.successful_tool_outputs,
+                    )
                     
                     return {
                         "status": "success",
@@ -458,17 +566,396 @@ Respond with a JSON object containing:
                         "response": response_text
                     }
             
-            return {
-                "status": "error",
-                "message": "Too many tool execution turns"
-            }
+            return await self._handle_query_failure(
+                user_input=user_input,
+                error_type="TooManyToolTurns",
+                error_message="Too many tool execution turns",
+                failure_context={
+                    "intent": intent.description,
+                    "tool_failures": query_state.tool_failures,
+                    "turn_limit": self._MAX_TOOL_TURNS,
+                }
+            )
             
         except Exception as e:
             self.agent_logger.error(f"Tool execution failed: {e}")
-            return {
-                "status": "error",
-                "message": f"Query processing failed: {str(e)}"
+            return await self._handle_query_failure(
+                user_input=user_input,
+                error_type=type(e).__name__,
+                error_message=f"Query processing failed: {str(e)}",
+                failure_context={
+                    "intent": intent.description,
+                    "tool_failures": query_state.tool_failures,
+                }
+            )
+
+    def _compact_tool_result(self, result: Any) -> Dict[str, Any]:
+        """Trim large tool outputs before they are fed back into the model."""
+        if hasattr(result, "to_dict"):
+            payload = result.to_dict()
+        else:
+            payload = {
+                "success": getattr(result, "success", False),
+                "data": getattr(result, "data", None),
+                "message": getattr(result, "message", ""),
+                "error": getattr(result, "error", None),
             }
+
+        compact_payload = self._compact_tool_data(payload)
+        if isinstance(compact_payload, dict):
+            compact_payload.setdefault("success", getattr(result, "success", False))
+            compact_payload.setdefault("message", getattr(result, "message", ""))
+        return compact_payload
+
+    def _sanitize_model_response(self, text: str) -> str:
+        """Remove leaked reasoning tags and normalize final user-facing text."""
+        text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _initialize_query_state(self, user_input: str) -> QueryState:
+        """Create the per-query runtime state container."""
+        return QueryState(
+            original_query=user_input,
+            requires_multi_source=self._query_needs_multi_source_reasoning(user_input),
+        )
+
+    def _merge_tool_args(self, base_args: Optional[Dict[str, Any]], new_args: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge tool args while preserving explicit values from the latest turn."""
+        merged = deepcopy(base_args or {})
+        for key, value in new_args.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = self._merge_tool_args(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    def _looks_like_endpoint_name(self, value: str) -> bool:
+        """Heuristic for degraded semantic values that are really endpoint identifiers."""
+        stripped = value.strip().lower()
+        if not stripped:
+            return False
+        if " " in stripped:
+            return False
+        return "_" in stripped or stripped.endswith("price") or stripped.endswith("rates")
+
+    def _prepare_tool_args(
+        self,
+        query_state: QueryState,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Carry forward useful context so later tool turns do not start from zero."""
+        merged = self._merge_tool_args(query_state.last_tool_args.get(tool_name), tool_args)
+        merged = self._merge_tool_args(query_state.last_successful_tool_args.get(tool_name), merged)
+
+        if tool_name == "public_api_call":
+            api_name = str(merged.get("api_name", "")).strip()
+            endpoint = str(merged.get("endpoint", "")).strip()
+
+            if not api_name:
+                merged["api_name"] = query_state.original_query
+            elif self._looks_like_endpoint_name(api_name) and not endpoint:
+                merged["endpoint"] = api_name
+                merged["api_name"] = query_state.original_query
+
+            merged.setdefault("query_text", query_state.original_query)
+            if query_state.entity_memory:
+                merged["entity_memory"] = self._merge_tool_args(
+                    merged.get("entity_memory"),
+                    query_state.entity_memory,
+                )
+
+        query_state.last_tool_args[tool_name] = deepcopy(merged)
+        return merged
+
+    def _update_query_state_entities(
+        self,
+        query_state: QueryState,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        compact_result: Dict[str, Any],
+    ) -> None:
+        """Accumulate reusable entities from tool interactions for later turns."""
+        if tool_name == "public_api_call":
+            for container_name in ("params", "path_params"):
+                container = tool_args.get(container_name, {})
+                if isinstance(container, dict):
+                    for key, value in container.items():
+                        if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+                            query_state.entity_memory[str(key)] = value
+
+        data = compact_result.get("data", {}) if isinstance(compact_result, dict) else {}
+        normalized = data.get("normalized") if isinstance(data, dict) else None
+        if isinstance(normalized, dict):
+            entities = normalized.get("entities", {})
+            if isinstance(entities, dict):
+                for key, value in entities.items():
+                    if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+                        query_state.entity_memory[str(key)] = value
+
+    def _finalize_query_response(
+        self,
+        response_text: str,
+        successful_tool_outputs: List[Dict[str, Any]],
+    ) -> str:
+        """Clean final text and fall back to deterministic summaries when needed."""
+        response_text = self._sanitize_model_response(response_text)
+        best_candidate = self._select_best_answer_candidate(successful_tool_outputs)
+
+        if (
+            best_candidate
+            and best_candidate.get("confidence", 0.0) >= self._HIGH_CONFIDENCE_DIRECT_ANSWER
+        ):
+            return best_candidate["text"]
+
+        if response_text and "{{" not in response_text and "}}" not in response_text:
+            return response_text
+
+        if best_candidate:
+            return best_candidate["text"]
+
+        return response_text
+
+    def _query_needs_multi_source_reasoning(self, user_input: str) -> bool:
+        """Detect queries that likely need comparison, ranking, or broader research."""
+        return bool(re.search(
+            r"\b(compare|comparison|vs\.?|versus|best|cheapest|top|alternatives|options|list|rank|ranking|review|reviews|analyze|analysis|trend|history|forecast)\b",
+            user_input,
+            flags=re.IGNORECASE,
+        ))
+
+    def _select_best_answer_candidate(
+        self,
+        successful_tool_outputs: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Choose the strongest answer candidate across tool outputs."""
+        best_candidate: Optional[Dict[str, Any]] = None
+        best_score = -1.0
+
+        for index, item in enumerate(successful_tool_outputs):
+            candidate = item.get("answer_candidate") or self._extract_answer_candidate(
+                item.get("tool", ""),
+                item.get("result", {}),
+            )
+            if not candidate:
+                continue
+
+            score = float(candidate.get("confidence", 0.0))
+            score += index * 0.0001
+            if score > best_score:
+                best_candidate = candidate
+                best_score = score
+
+        return best_candidate
+
+    def _extract_answer_candidate(self, tool_name: str, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract a user-facing candidate answer and confidence from a tool result."""
+        data = result.get("data", {}) if isinstance(result, dict) else {}
+        normalized = data.get("normalized") if isinstance(data, dict) else None
+
+        if isinstance(normalized, dict):
+            answer_text = normalized.get("answer_text")
+            if isinstance(answer_text, str) and answer_text.strip():
+                return {
+                    "text": answer_text.strip(),
+                    "confidence": float(normalized.get("confidence", 0.95)),
+                    "source": f"{tool_name}:normalized",
+                }
+
+            if normalized.get("kind") == "price_quote":
+                asset = normalized.get("asset") or "Asset"
+                quote = normalized.get("quote") or "USD"
+                price = normalized.get("price")
+                if price is not None:
+                    return {
+                        "text": f"The current price of {asset} is {price} {quote}.",
+                        "confidence": float(normalized.get("confidence", 0.95)),
+                        "source": f"{tool_name}:normalized",
+                    }
+
+        if tool_name == "public_api_call":
+            response_data = data.get("response") if isinstance(data, dict) else None
+            fallback = self._extract_price_quote_from_response(response_data)
+            if fallback:
+                asset, price, quote = fallback
+                return {
+                    "text": f"The current price of {asset} is {price} {quote}.",
+                    "confidence": 0.8,
+                    "source": f"{tool_name}:response",
+                }
+
+        if tool_name == "web_scrape":
+            extracted = data.get("extracted_data") if isinstance(data, dict) else None
+            fallback = self._extract_price_quote_from_response(extracted)
+            if fallback:
+                asset, price, quote = fallback
+                return {
+                    "text": f"The current price of {asset} is {price} {quote}.",
+                    "confidence": 0.4,
+                    "source": f"{tool_name}:extracted_data",
+                }
+
+        return None
+
+    def _synthesize_query_answer(self, successful_tool_outputs: List[Dict[str, Any]]) -> Optional[str]:
+        """Build a user-facing answer directly from recent successful tool outputs."""
+        best_candidate = self._select_best_answer_candidate(successful_tool_outputs)
+        return best_candidate["text"] if best_candidate else None
+
+    def _extract_price_quote_from_response(self, payload: Any) -> Optional[Tuple[str, Any, str]]:
+        """Extract a simple asset/price/quote triple from nested JSON-like payloads."""
+        if not isinstance(payload, dict):
+            return None
+
+        if len(payload) == 1:
+            asset, quote_map = next(iter(payload.items()))
+            if isinstance(quote_map, dict) and len(quote_map) == 1:
+                quote, price = next(iter(quote_map.items()))
+                return str(asset).upper(), price, str(quote).upper()
+
+        data = payload.get("data")
+        if isinstance(data, dict):
+            amount = data.get("amount")
+            currency = data.get("currency")
+            base = data.get("base") or data.get("asset") or "BTC"
+            if amount is not None and currency:
+                return str(base).upper(), amount, str(currency).upper()
+
+        return None
+
+    def _compact_tool_data(self, value: Any, depth: int = 0) -> Any:
+        """Recursively shrink large tool payloads to keep token usage bounded."""
+        if depth >= self._MAX_TOOL_NESTING_DEPTH:
+            return {"_truncated": True, "type": type(value).__name__}
+
+        if isinstance(value, str):
+            if len(value) <= self._MAX_TOOL_STRING_CHARS:
+                return value
+            return (
+                value[:self._MAX_TOOL_STRING_CHARS]
+                + f"... [truncated {len(value) - self._MAX_TOOL_STRING_CHARS} chars]"
+            )
+
+        if isinstance(value, list):
+            items = [
+                self._compact_tool_data(item, depth + 1)
+                for item in value[:self._MAX_TOOL_COLLECTION_ITEMS]
+            ]
+            if len(value) > self._MAX_TOOL_COLLECTION_ITEMS:
+                items.append({
+                    "_truncated_items": len(value) - self._MAX_TOOL_COLLECTION_ITEMS
+                })
+            return items
+
+        if isinstance(value, dict):
+            compacted: Dict[str, Any] = {}
+            items = list(value.items())
+            for key, item in items[:self._MAX_TOOL_COLLECTION_ITEMS]:
+                compacted[str(key)] = self._compact_tool_data(item, depth + 1)
+            if len(items) > self._MAX_TOOL_COLLECTION_ITEMS:
+                compacted["_truncated_keys"] = len(items) - self._MAX_TOOL_COLLECTION_ITEMS
+            return compacted
+
+        return value
+
+    async def _handle_query_failure(
+        self,
+        user_input: str,
+        error_type: str,
+        error_message: str,
+        failure_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Persist a query failure and trigger self-healing analysis."""
+        failure_context = failure_context or {}
+
+        await self._record_query_failure(user_input, error_type, error_message, failure_context)
+        healing_result = await self._attempt_query_self_heal(
+            user_input=user_input,
+            error_type=error_type,
+            error_message=error_message,
+            failure_context=failure_context,
+        )
+
+        message = error_message
+        if healing_result and healing_result.get("suggested_fix"):
+            message = f"{message}. Self-heal suggestion: {healing_result['suggested_fix']}"
+
+        return {
+            "status": "error",
+            "intent": "query",
+            "message": message,
+            "recovery_attempted": healing_result is not None,
+            "self_heal": healing_result,
+        }
+
+    async def _record_query_failure(
+        self,
+        user_input: str,
+        error_type: str,
+        error_message: str,
+        failure_context: Dict[str, Any]
+    ) -> None:
+        """Push query failures into the DLQ for later inspection."""
+        try:
+            dlq = get_dead_letter_queue()
+            message = OctoMessage(
+                sender=self.name,
+                receiver="SelfHealingAgent",
+                type=MessageType.QUERY,
+                payload={
+                    "input": user_input,
+                    "failure_context": self._compact_tool_data(failure_context),
+                },
+                context=AgentContext(
+                    workspace_path=".",
+                    user_id=self._config.user.name or "default",
+                    metadata={"intent": "query"},
+                ),
+            )
+            dlq.add(
+                message=message,
+                error_type=error_type,
+                error_message=error_message,
+                agent_name=self.name,
+            )
+        except Exception as dlq_error:
+            self.agent_logger.warning(f"Failed to record query failure in DLQ: {dlq_error}")
+
+    async def _attempt_query_self_heal(
+        self,
+        user_input: str,
+        error_type: str,
+        error_message: str,
+        failure_context: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Run the self-healing agent against a query/tool failure."""
+        try:
+            from src.specialist.self_healing_agent import get_self_healing_agent
+
+            healer = get_self_healing_agent()
+            healer._bedrock_client = self._bedrock_client
+            result = await healer.execute_task(TaskPayload(
+                action="analyze_failure",
+                params={
+                    "failure_data": {
+                        "type": "task_failure",
+                        "context": {
+                            "error": f"{error_type}: {error_message}",
+                            "user_input": user_input,
+                            "tool_failures": self._compact_tool_data(
+                                failure_context.get("tool_failures", [])
+                            ),
+                            "failure_context": self._compact_tool_data(failure_context),
+                        }
+                    }
+                },
+                priority=8,
+            ))
+            return result if isinstance(result, dict) else None
+        except Exception as heal_error:
+            self.agent_logger.warning(f"Self-healing analysis failed: {heal_error}")
+            return None
 
 
     

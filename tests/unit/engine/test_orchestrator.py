@@ -12,9 +12,11 @@ from src.engine.orchestrator import (
     Orchestrator,
     IntentType,
     IntentAnalysis,
+    QueryState,
     SubTask,
     get_orchestrator,
 )
+from src.primitives.base_primitive import PrimitiveResult
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +221,348 @@ class TestHandleChat:
         result = await orchestrator._handle_chat("hi", chat_intent)
         assert result["status"] == "error"
         assert "message" in result
+
+
+# ---------------------------------------------------------------------------
+# _handle_query
+# ---------------------------------------------------------------------------
+
+class TestHandleQuery:
+    """Test _handle_query failure handling and payload compaction."""
+
+    @pytest.fixture
+    def query_intent(self):
+        return IntentAnalysis("query", 0.95, "query", [], 1, {})
+
+    @pytest.mark.asyncio
+    async def test_query_triggers_self_heal_after_repeated_tool_failures(
+        self,
+        orchestrator,
+        mock_bedrock_client,
+        query_intent,
+    ):
+        tool_response = {
+            "output": {
+                "message": {
+                    "content": [{
+                        "toolUse": {
+                            "name": "web_search",
+                            "toolUseId": "tool-1",
+                            "input": {"query": "btc price"},
+                        }
+                    }]
+                }
+            },
+            "stopReason": "tool_use",
+        }
+        mock_bedrock_client.converse.side_effect = [tool_response, tool_response]
+
+        registry = MagicMock()
+        registry.to_bedrock_tool_config.return_value = []
+        registry.execute_tool = AsyncMock(return_value=PrimitiveResult(
+            success=False,
+            data=None,
+            message="search failed",
+            error="AllProvidersFailed",
+        ))
+
+        orchestrator._record_query_failure = AsyncMock()
+        orchestrator._attempt_query_self_heal = AsyncMock(return_value={
+            "suggested_fix": "Switch to a lower-cost fallback tool",
+            "can_recover": True,
+        })
+
+        with patch("src.primitives.tool_registry.get_registry", return_value=registry):
+            result = await orchestrator._handle_query("get btc price", query_intent)
+
+        assert result["status"] == "error"
+        assert result["recovery_attempted"] is True
+        assert "Self-heal suggestion" in result["message"]
+        orchestrator._record_query_failure.assert_called_once()
+        orchestrator._attempt_query_self_heal.assert_called_once()
+        assert registry.execute_tool.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_query_compacts_large_tool_results(
+        self,
+        orchestrator,
+        mock_bedrock_client,
+        query_intent,
+    ):
+        mock_bedrock_client.converse.side_effect = [
+            {
+                "output": {
+                    "message": {
+                        "content": [{
+                            "toolUse": {
+                                "name": "read_file",
+                                "toolUseId": "tool-1",
+                                "input": {"path": "/tmp/big.txt"},
+                            }
+                        }]
+                    }
+                },
+                "stopReason": "tool_use",
+            },
+            {
+                "output": {
+                    "message": {
+                        "content": [{"text": "done"}]
+                    }
+                },
+                "stopReason": "end_turn",
+            },
+        ]
+
+        registry = MagicMock()
+        registry.to_bedrock_tool_config.return_value = []
+        registry.execute_tool = AsyncMock(return_value=PrimitiveResult(
+            success=True,
+            data={"content": "x" * 5000},
+            message="ok",
+        ))
+
+        with patch("src.primitives.tool_registry.get_registry", return_value=registry):
+            result = await orchestrator._handle_query("read that file", query_intent)
+
+        assert result["status"] == "success"
+        second_call = mock_bedrock_client.converse.call_args_list[1]
+        tool_result_message = next(
+            message for message in reversed(second_call.kwargs["messages"])
+            if message.get("role") == "user" and "toolResult" in message["content"][0]
+        )
+        tool_json = tool_result_message["content"][0]["toolResult"]["content"][0]["json"]
+        assert len(tool_json["data"]["content"]) < 5000
+        assert "truncated" in tool_json["data"]["content"]
+
+    @pytest.mark.asyncio
+    async def test_query_strips_thinking_tags_from_final_response(
+        self,
+        orchestrator,
+        mock_bedrock_client,
+        query_intent,
+    ):
+        mock_bedrock_client.converse.return_value = {
+            "output": {
+                "message": {
+                    "content": [{
+                        "text": "<thinking>secret</thinking>\n\nFinal answer"
+                    }]
+                }
+            },
+            "stopReason": "end_turn",
+        }
+
+        registry = MagicMock()
+        registry.to_bedrock_tool_config.return_value = []
+
+        with patch("src.primitives.tool_registry.get_registry", return_value=registry):
+            result = await orchestrator._handle_query("get btc price", query_intent)
+
+        assert result["status"] == "success"
+        assert result["response"] == "Final answer"
+
+    @pytest.mark.asyncio
+    async def test_query_synthesizes_answer_when_model_leaves_unresolved_placeholder(
+        self,
+        orchestrator,
+        mock_bedrock_client,
+        query_intent,
+    ):
+        mock_bedrock_client.converse.side_effect = [
+            {
+                "output": {
+                    "message": {
+                        "content": [{
+                            "toolUse": {
+                                "name": "public_api_call",
+                                "toolUseId": "tool-1",
+                                "input": {
+                                    "api_name": "bitcoin price",
+                                    "endpoint": "spot_price",
+                                    "path_params": {"pair": "BTC-USD"},
+                                },
+                            }
+                        }]
+                    }
+                },
+                "stopReason": "tool_use",
+            },
+            {
+                "output": {
+                    "message": {
+                        "content": [{
+                            "text": "The current price of Bitcoin (BTC) is ${{toolResult[0].result.data.response.bitcoin.usd}} USD."
+                        }]
+                    }
+                },
+                "stopReason": "end_turn",
+            },
+        ]
+
+        registry = MagicMock()
+        registry.to_bedrock_tool_config.return_value = []
+        registry.execute_tool = AsyncMock(return_value=PrimitiveResult(
+            success=True,
+            data={
+                "normalized": {
+                    "kind": "price_quote",
+                    "asset": "BTC",
+                    "quote": "USD",
+                    "price": "82000.12",
+                },
+                "response": {"data": {"amount": "82000.12", "currency": "USD"}},
+            },
+            message="ok",
+        ))
+
+        with patch("src.primitives.tool_registry.get_registry", return_value=registry):
+            result = await orchestrator._handle_query("get btc price", query_intent)
+
+        assert result["status"] == "success"
+        assert result["response"] == "The current price of BTC is 82000.12 USD."
+
+    @pytest.mark.asyncio
+    async def test_query_returns_early_after_high_confidence_structured_tool_answer(
+        self,
+        orchestrator,
+        mock_bedrock_client,
+        query_intent,
+    ):
+        mock_bedrock_client.converse.return_value = {
+            "output": {
+                "message": {
+                    "content": [{
+                        "toolUse": {
+                            "name": "public_api_call",
+                            "toolUseId": "tool-1",
+                            "input": {
+                                "api_name": "btc current price",
+                            },
+                        }
+                    }]
+                }
+            },
+            "stopReason": "tool_use",
+        }
+
+        registry = MagicMock()
+        registry.to_bedrock_tool_config.return_value = []
+        registry.execute_tool = AsyncMock(return_value=PrimitiveResult(
+            success=True,
+            data={
+                "normalized": {
+                    "kind": "price_quote",
+                    "asset": "BTC",
+                    "quote": "USD",
+                    "price": "71500",
+                }
+            },
+            message="ok",
+        ))
+
+        with patch("src.primitives.tool_registry.get_registry", return_value=registry):
+            result = await orchestrator._handle_query("get btc current price", query_intent)
+
+        assert result == {
+            "status": "success",
+            "intent": "query",
+            "response": "The current price of BTC is 71500 USD.",
+        }
+        assert mock_bedrock_client.converse.call_count == 1
+
+    def test_synthesize_query_answer_prefers_structured_api_price_over_scraped_price(
+        self,
+        orchestrator,
+    ):
+        successful_tool_outputs = [
+            {
+                "tool": "public_api_call",
+                "result": {
+                    "data": {
+                        "normalized": {
+                            "kind": "price_quote",
+                            "asset": "BTC",
+                            "quote": "USD",
+                            "price": "71535",
+                        }
+                    }
+                },
+            },
+            {
+                "tool": "web_scrape",
+                "result": {
+                    "data": {
+                        "extracted_data": {
+                            "bitcoin": {
+                                "usd": "64300",
+                            }
+                        }
+                    }
+                },
+            },
+        ]
+
+        result = orchestrator._synthesize_query_answer(successful_tool_outputs)
+
+        assert result == "The current price of BTC is 71535 USD."
+
+    def test_query_detects_multi_source_queries(self, orchestrator):
+        assert orchestrator._query_needs_multi_source_reasoning("compare btc price across exchanges") is True
+        assert orchestrator._query_needs_multi_source_reasoning("get btc current price") is False
+
+    def test_prepare_tool_args_carries_forward_query_context_for_public_api_call(self, orchestrator):
+        query_state = QueryState(
+            original_query="get btc current price",
+            requires_multi_source=False,
+            entity_memory={"asset": "BTC", "quote": "USD"},
+            last_successful_tool_args={
+                "public_api_call": {
+                    "api_name": "btc current price",
+                    "path_params": {"pair": "BTC-USD"},
+                }
+            },
+        )
+
+        prepared = orchestrator._prepare_tool_args(
+            query_state,
+            "public_api_call",
+            {"api_name": "spot_price"},
+        )
+
+        assert prepared["api_name"] == "get btc current price"
+        assert prepared["endpoint"] == "spot_price"
+        assert prepared["query_text"] == "get btc current price"
+        assert prepared["entity_memory"] == {"asset": "BTC", "quote": "USD"}
+        assert prepared["path_params"] == {"pair": "BTC-USD"}
+
+    def test_update_query_state_entities_collects_normalized_entities(self, orchestrator):
+        query_state = QueryState(
+            original_query="get btc current price",
+            requires_multi_source=False,
+        )
+
+        orchestrator._update_query_state_entities(
+            query_state,
+            "public_api_call",
+            {"path_params": {"pair": "BTC-USD"}},
+            {
+                "data": {
+                    "normalized": {
+                        "entities": {
+                            "asset": "BTC",
+                            "quote": "USD",
+                        }
+                    }
+                }
+            },
+        )
+
+        assert query_state.entity_memory == {
+            "pair": "BTC-USD",
+            "asset": "BTC",
+            "quote": "USD",
+        }
 
 
 # ---------------------------------------------------------------------------

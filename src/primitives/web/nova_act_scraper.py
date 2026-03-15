@@ -17,6 +17,7 @@ Example:
 
 import json
 import base64
+import re
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 from enum import Enum
@@ -79,6 +80,9 @@ class NovaActScraper(BasePrimitive):
     - Faster but limited to static content
     - Best for: Static sites, simple HTML
     """
+
+    MAX_NOVA_ACT_SOURCE_CHARS = 16000
+    MAX_NOVA_ACT_IMAGE_SOURCE_CHARS = 8000
     
     def __init__(self) -> None:
         """Initialize Nova Act Scraper."""
@@ -274,6 +278,7 @@ class NovaActScraper(BasePrimitive):
         Uses Playwright to render JS and Bedrock to analyze the content.
         """
         html_content = ""
+        page_text = ""
         screenshot_b64 = None
         
         if HAS_PLAYWRIGHT:
@@ -286,6 +291,10 @@ class NovaActScraper(BasePrimitive):
                     
                     # Get rendered HTML
                     html_content = await page.content()
+                    page_text = await page.evaluate("() => document.body?.innerText || ''")
+                    page_title = await page.title()
+                    if page_title:
+                        page_text = f"{page_title}\n{page_text}".strip()
                     
                     # Take screenshot for multimodal analysis (Nova Act specialty)
                     screenshot_bytes = await page.screenshot(type="jpeg", quality=80, full_page=False)
@@ -304,26 +313,39 @@ class NovaActScraper(BasePrimitive):
                 )
                 response.raise_for_status()
                 html_content = response.text
+                page_text = response.text
         
         # Truncate if too large using config
         truncated = False
         if len(html_content) > self._config.web.max_html_size:
             html_content = html_content[:self._config.web.max_html_size]
             truncated = True
-        
+
+        source_snapshot, source_label, source_truncated = self._prepare_nova_act_source(
+            page_text or html_content,
+            extract_query,
+        )
+        truncated = truncated or source_truncated
+        signal_lines = self._extract_signal_lines(source_snapshot, extract_query)
+
         # Use Bedrock to extract structured data
         client = self._get_bedrock_client()
         model_id = self._config.web.nova_act_model
         
         prompt = f"""
-You are a web scraping assistant. Given the HTML content of a web page and its screenshot, extract the requested information.
+You are a web scraping assistant. Given a condensed page snapshot and optional screenshot, extract the requested information.
 
 URL: {url}
 EXTRACTION REQUEST: {extract_query}
 
-HTML CONTENT (may be truncated):
-```html
-{html_content}
+{source_label} (may be truncated):
+```text
+{source_snapshot}
+```
+
+HIGH-SIGNAL LINES:
+```text
+{signal_lines or 'No high-signal lines detected'}
 ```
 
 Please extract the requested information and return it as JSON. Be precise and extract exactly what was asked for.
@@ -343,7 +365,7 @@ Return your response in this format:
         content_items = [{"text": prompt}]
         
         # Add image if available
-        if screenshot_b64:
+        if screenshot_b64 and len(source_snapshot) <= self.MAX_NOVA_ACT_IMAGE_SOURCE_CHARS:
             content_items.append({
                 "image": {
                     "format": "jpeg",
@@ -393,6 +415,73 @@ Return your response in this format:
                 "_format": "raw",
                 "_truncated_html": truncated
             }
+
+    def _prepare_nova_act_source(self, source_text: str, extract_query: str) -> tuple[str, str, bool]:
+        """Build a compact text snapshot suitable for model input limits."""
+        if HAS_BS4 and "<" in source_text and ">" in source_text:
+            soup = BeautifulSoup(source_text, 'lxml')
+            for tag in soup(["script", "style", "noscript", "svg"]):
+                tag.decompose()
+            source = soup.get_text(" ", strip=True)
+            label = "VISIBLE PAGE TEXT"
+        else:
+            source = "\n".join(line.strip() for line in source_text.splitlines() if line.strip())
+            label = "RENDERED PAGE TEXT"
+
+        source = self._prioritize_relevant_lines(source, extract_query)
+
+        truncated = len(source) > self.MAX_NOVA_ACT_SOURCE_CHARS
+        if truncated:
+            source = source[:self.MAX_NOVA_ACT_SOURCE_CHARS]
+
+        return source, label, truncated
+
+    def _prioritize_relevant_lines(self, source: str, extract_query: str) -> str:
+        """Move lines likely relevant to the extract query toward the top of the snapshot."""
+        lines = [line.strip() for line in source.splitlines() if line.strip()]
+        if not lines:
+            return source
+
+        keywords = {
+            token.lower()
+            for token in re.findall(r"[a-zA-Z0-9$]+", extract_query)
+            if len(token) > 2
+        }
+        boosted = []
+        remainder = []
+
+        for line in lines:
+            lowered = line.lower()
+            score = sum(1 for keyword in keywords if keyword in lowered)
+            if "$" in line or "usd" in lowered or "price" in lowered:
+                score += 2
+            if score > 0:
+                boosted.append((score, line))
+            else:
+                remainder.append(line)
+
+        boosted.sort(key=lambda item: item[0], reverse=True)
+        prioritized = [line for _, line in boosted[:40]] + remainder[:120]
+        return "\n".join(prioritized)
+
+    def _extract_signal_lines(self, source_snapshot: str, extract_query: str) -> str:
+        """Extract a compact subset of price-like or query-matching lines for the model."""
+        keywords = {
+            token.lower()
+            for token in re.findall(r"[a-zA-Z0-9$]+", extract_query)
+            if len(token) > 2
+        }
+        lines = []
+        for raw_line in source_snapshot.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            lowered = line.lower()
+            if any(keyword in lowered for keyword in keywords) or re.search(r"\$\s?\d", line) or "usd" in lowered:
+                lines.append(line)
+            if len(lines) >= 20:
+                break
+        return "\n".join(lines)
     
     async def _scrape_with_html(
         self,

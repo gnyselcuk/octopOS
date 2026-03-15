@@ -100,6 +100,14 @@ class SelfHealingAgent(BaseAgent):
             code = task.params.get("code", "")
             stack_trace = task.params.get("stack_trace", "")
             return await self.debug_error(error_description, code, stack_trace)
+
+        elif task.action == "analyze_error":
+            return await self.analyze_error_entry(
+                error_type=task.params.get("error_type", "UnknownError"),
+                error_message=task.params.get("error_message", ""),
+                original_message=task.params.get("original_message", {}),
+                agent_name=task.params.get("agent_name", "unknown"),
+            )
             
         elif task.action == "analyze_failure":
             failure_data = task.params.get("failure_data", {})
@@ -109,6 +117,10 @@ class SelfHealingAgent(BaseAgent):
             code = task.params.get("code", "")
             fix_suggestion = task.params.get("fix_suggestion", "")
             return await self.attempt_repair(code, fix_suggestion)
+
+        elif task.action == "fix_sandbox":
+            issue = task.params.get("issue", "unknown")
+            return await self.fix_sandbox(issue)
             
         elif task.action == "test_code":
             code = task.params.get("code", "")
@@ -174,6 +186,48 @@ class SelfHealingAgent(BaseAgent):
             "suggested_fix": analysis.suggested_fix,
             "auto_repairable": analysis.auto_repairable,
             "requires_manual_fix": not analysis.auto_repairable
+        }
+
+    async def analyze_error_entry(
+        self,
+        error_type: str,
+        error_message: str,
+        original_message: Optional[Dict[str, Any]] = None,
+        agent_name: str = "unknown"
+    ) -> Dict[str, Any]:
+        """Analyze a DLQ error entry and report recoverability."""
+        message_context = ""
+        if original_message:
+            try:
+                message_context = json.dumps(original_message, ensure_ascii=True)
+            except TypeError:
+                message_context = str(original_message)
+
+        analysis = await self._analyze_error(
+            error_description=(
+                f"{error_type}: {error_message}\n"
+                f"Agent: {agent_name}\n"
+                f"Original message: {message_context[:2000]}"
+            ),
+            code="",
+            stack_trace=""
+        )
+        return self._analysis_to_recovery_result(analysis)
+
+    def _analysis_to_recovery_result(self, analysis: ErrorAnalysis) -> Dict[str, Any]:
+        """Normalize analysis output for recovery-oriented callers."""
+        can_recover = analysis.auto_repairable or analysis.confidence >= 0.6
+        return {
+            "status": "analyzed",
+            "can_recover": can_recover,
+            "analysis": {
+                "error_type": analysis.error_type,
+                "root_cause": analysis.root_cause,
+                "severity": analysis.severity.value,
+                "confidence": analysis.confidence,
+            },
+            "suggested_fix": analysis.suggested_fix,
+            "auto_repairable": analysis.auto_repairable,
         }
     
     async def _analyze_error(
@@ -360,11 +414,12 @@ Provide only the repaired code, no explanations."""
         if failure_type == "sandbox_failure":
             return await self.fix_sandbox(failure_context.get("issue", "unknown"))
         elif failure_type == "task_failure":
-            return await self.debug_error(
+            analysis = await self._analyze_error(
                 failure_context.get("error", ""),
                 failure_context.get("code", ""),
                 failure_context.get("stack_trace", "")
             )
+            return self._analysis_to_recovery_result(analysis)
         elif failure_type == "connection_failure":
             return await self._handle_connection_failure(failure_context)
         else:

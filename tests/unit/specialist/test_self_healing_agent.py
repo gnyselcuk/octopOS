@@ -168,6 +168,35 @@ class TestSelfHealingAgentTaskExecution:
         
         mock_agent.analyze_failure.assert_called_once()
         assert result["status"] == "identified"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_analyze_error(self, mock_agent):
+        """Test executing analyze_error task."""
+        task = TaskPayload(
+            task_id=uuid4(),
+            action="analyze_error",
+            params={
+                "error_type": "RuntimeError",
+                "error_message": "boom",
+                "original_message": {"payload": "x"},
+                "agent_name": "MainBrain",
+            }
+        )
+
+        mock_agent.analyze_error_entry = AsyncMock(return_value={
+            "status": "analyzed",
+            "can_recover": True,
+        })
+
+        result = await mock_agent.execute_task(task)
+
+        mock_agent.analyze_error_entry.assert_called_once_with(
+            error_type="RuntimeError",
+            error_message="boom",
+            original_message={"payload": "x"},
+            agent_name="MainBrain",
+        )
+        assert result["status"] == "analyzed"
     
     @pytest.mark.asyncio
     async def test_execute_task_attempt_repair(self, mock_agent):
@@ -514,9 +543,14 @@ class TestSelfHealingAgentAnalyzeFailure:
     @pytest.mark.asyncio
     async def test_analyze_task_failure(self, mock_agent):
         """Test analyzing task failure."""
-        mock_agent.debug_error = AsyncMock(return_value={
-            "status": "analysis_complete"
-        })
+        mock_agent._analyze_error = AsyncMock(return_value=ErrorAnalysis(
+            error_type="RuntimeError",
+            root_cause="Repeated tool failure",
+            severity=ErrorSeverity.MEDIUM,
+            suggested_fix="Use fallback",
+            auto_repairable=False,
+            confidence=0.7,
+        ))
         
         result = await mock_agent.analyze_failure({
             "type": "task_failure",
@@ -527,7 +561,13 @@ class TestSelfHealingAgentAnalyzeFailure:
             }
         })
         
-        mock_agent.debug_error.assert_called_once()
+        mock_agent._analyze_error.assert_called_once_with(
+            "Error message",
+            "def test(): pass",
+            "Traceback..."
+        )
+        assert result["status"] == "analyzed"
+        assert result["can_recover"] is True
     
     @pytest.mark.asyncio
     async def test_analyze_connection_failure(self, mock_agent):

@@ -7,7 +7,7 @@ This module implements the long-term memory system that stores:
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +17,27 @@ from src.utils.config import get_config
 from src.utils.logger import get_logger
 
 logger = get_logger()
+
+
+def _utc_now() -> datetime:
+    """Return a timezone-aware UTC timestamp."""
+    return datetime.now(timezone.utc)
+
+
+def _utc_now_iso() -> str:
+    """Return a timezone-aware UTC timestamp in ISO format."""
+    return _utc_now().isoformat()
+
+
+def _parse_timestamp(timestamp: Optional[str]) -> datetime:
+    """Parse stored timestamps and normalize naive values to UTC."""
+    if not timestamp:
+        return _utc_now()
+
+    parsed = datetime.fromisoformat(timestamp)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 @dataclass
@@ -130,16 +151,11 @@ class SemanticMemory:
         import pyarrow as pa
         
         try:
-            df = self._table.to_pandas()
+            df = self._table.to_arrow().to_pylist()
             
-            if "access_count" not in df.columns:
-                df["access_count"] = 1
-            if "last_accessed" not in df.columns:
-                df["last_accessed"] = df["timestamp"]
-            
-            # Ensure correct types
-            df["access_count"] = df["access_count"].astype("int32")
-            df["last_accessed"] = df["last_accessed"].astype(str)
+            for row in df:
+                row.setdefault("access_count", 1)
+                row.setdefault("last_accessed", row.get("timestamp"))
             
             # Drop and recreate
             self._db.drop_table(table_name)
@@ -223,17 +239,18 @@ class SemanticMemory:
             vector = await self._get_embedding(content)
             
             # Create entry
-            entry_id = f"{category}_{datetime.utcnow().isoformat()}"
+            now_iso = _utc_now_iso()
+            entry_id = f"{category}_{now_iso}"
             
             self._table.add([{
                 "id": entry_id,
                 "content": content,
                 "category": category,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": now_iso,
                 "source": source,
                 "confidence": confidence,
                 "access_count": 1,
-                "last_accessed": datetime.utcnow().isoformat(),
+                "last_accessed": now_iso,
                 "vector": vector,
                 "metadata": json.dumps(metadata or {})
             }])
@@ -279,10 +296,10 @@ class SemanticMemory:
             if category:
                 search = search.where(f'category = "{category}"')
             
-            results = search.to_pandas()
+            results = search.to_arrow().to_pylist()
             
             entries = []
-            for _, row in results.iterrows():
+            for row in results:
                 distance = float(row.get('_distance', 2.0))
                 # Convert L2/Cosine distance to a 0-1 similarity score safely
                 similarity = 1.0 / (1.0 + distance)
@@ -297,7 +314,7 @@ class SemanticMemory:
                         confidence=row['confidence'],
                         metadata=json.loads(row.get('metadata', '{}')),
                         access_count=row.get('access_count', 1),
-                        last_accessed=row.get('last_accessed', datetime.utcnow().isoformat())
+                        last_accessed=row.get('last_accessed', _utc_now_iso())
                     )
                     entries.append(entry)
             
@@ -342,20 +359,26 @@ class SemanticMemory:
         This simulates synaptic strengthening in the brain.
         """
         try:
-            now = datetime.utcnow().isoformat()
+            now = _utc_now_iso()
             # Current LanceDB Python API allows updating rows with a where clause.
             # We will iterate through IDs or do it in one go if possible.
             for mem_id in memory_ids:
                 try:
                     # Incrementing requires reading the old value or using an update statement.
                     # We'll fetch the old row, increment, and replace (safe fallback if no raw SQL update exists)
-                    rows = self._table.search().where(f'id = "{mem_id}"').limit(1).to_pandas()
-                    if len(rows) > 0:
-                        old_count = rows.iloc[0].get('access_count', 1)
+                    rows = (
+                        self._table.search()
+                        .where(f'id = "{mem_id}"')
+                        .limit(1)
+                        .to_arrow()
+                        .to_pylist()
+                    )
+                    if rows:
+                        row_dict = dict(rows[0])
+                        old_count = row_dict.get('access_count', 1)
                         # Delete old row
                         self._table.delete(f'id = "{mem_id}"')
                         # Insert new row with updated values
-                        row_dict = rows.iloc[0].to_dict()
                         row_dict["access_count"] = old_count + 1
                         row_dict["last_accessed"] = now
                         self._table.add([row_dict])
@@ -376,23 +399,23 @@ class SemanticMemory:
             await self.initialize()
             
         try:
-            df = self._table.to_pandas()
-            if len(df) == 0:
+            rows = self._table.to_arrow().to_pylist()
+            if not rows:
                 return 0
                 
-            now = datetime.utcnow()
+            now = _utc_now()
             to_delete = []
             
-            for _, row in df.iterrows():
+            for row in rows:
                 mem_id = row['id']
                 access_count = row.get('access_count', 1)
                 last_acc_str = row.get('last_accessed')
                 
                 try:
                     if last_acc_str:
-                        last_acc = datetime.fromisoformat(last_acc_str)
+                        last_acc = _parse_timestamp(last_acc_str)
                     else:
-                        last_acc = datetime.fromisoformat(row['timestamp'])
+                        last_acc = _parse_timestamp(row['timestamp'])
                 except ValueError:
                     last_acc = now
                     
@@ -435,14 +458,15 @@ class SemanticMemory:
                 self._table.search()
                 .where(f'id = "{memory_id}"')
                 .limit(1)
-                .to_pandas()
+                .to_arrow()
+                .to_pylist()
             )
             
-            if len(results) == 0:
+            if not results:
                 logger.warning(f"Memory not found: {memory_id}")
                 return False
             
-            row = results.iloc[0]
+            row = dict(results[0])
             
             # Delete old
             self._table.delete(f'id = "{memory_id}"')
@@ -455,6 +479,8 @@ class SemanticMemory:
                 "timestamp": row['timestamp'],
                 "source": row['source'],
                 "confidence": new_confidence,
+                "access_count": row.get("access_count", 1),
+                "last_accessed": row.get("last_accessed", row.get("timestamp", _utc_now_iso())),
                 "vector": row['vector'],
                 "metadata": row['metadata']
             }])
@@ -476,20 +502,26 @@ class SemanticMemory:
             return {"status": "not_initialized"}
         
         try:
-            df = self._table.to_pandas()
+            rows = self._table.to_arrow().to_pylist()
+            confidences = [
+                float(row["confidence"])
+                for row in rows
+                if row.get("confidence") is not None
+            ]
+            by_category: Dict[str, int] = {}
+            for row in rows:
+                category = row.get("category", "unknown")
+                by_category[category] = by_category.get(category, 0) + 1
             
             stats = {
                 "status": "initialized",
-                "total_memories": len(df),
-                "by_category": {},
-                "avg_confidence": float(df['confidence'].mean()) if len(df) > 0 else 0
+                "total_memories": len(rows),
+                "by_category": by_category,
+                "avg_confidence": (
+                    sum(confidences) / len(confidences)
+                    if confidences else 0
+                ),
             }
-            
-            # Count by category
-            for category in df['category'].unique():
-                count = len(df[df['category'] == category])
-                stats["by_category"][category] = count
-            
             return stats
             
         except Exception as e:

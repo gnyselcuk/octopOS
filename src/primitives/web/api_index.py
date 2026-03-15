@@ -4,7 +4,6 @@ Indexes API definitions from a JSON file into LanceDB for semantic retrieval.
 """
 
 import json
-import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -62,9 +61,13 @@ class APIIndex:
                 await self.sync_index()
             else:
                 self._table = self._db.open_table(self._table_name)
+                if self._row_count() == 0 or self._needs_sync_with_json():
+                    await self.sync_index()
                 
             self._initialized = True
-            logger.info(f"API Index initialized with {len(self._table.to_pandas()) if self._table else 0} endpoint entries")
+            logger.info(
+                f"API Index initialized with {self._row_count() if self._table else 0} endpoint entries"
+            )
             
         except Exception as e:
             logger.error(f"Failed to initialize API Index: {e}")
@@ -86,13 +89,9 @@ class APIIndex:
     async def sync_index(self) -> None:
         """Synchronize the vector database with the JSON definition file."""
         try:
-            json_file = Path(self._json_path)
-            if not json_file.exists():
-                logger.warning(f"API definition file not found: {self._json_path}")
+            apis = self._load_api_definitions()
+            if apis is None:
                 return
-                
-            with open(json_file, 'r') as f:
-                apis = json.load(f)
             
             data_to_add = []
             for api_id, definition in apis.items():
@@ -122,6 +121,47 @@ class APIIndex:
         except Exception as e:
             logger.error(f"Failed to sync API index: {e}")
 
+    def _load_api_definitions(self) -> Optional[Dict[str, Any]]:
+        """Load curated API definitions from disk."""
+        json_file = Path(self._json_path)
+        if not json_file.exists():
+            logger.warning(f"API definition file not found: {self._json_path}")
+            return None
+
+        with open(json_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    def _needs_sync_with_json(self) -> bool:
+        """Return True when the persisted index is stale relative to the JSON catalog."""
+        if self._table is None:
+            return False
+
+        apis = self._load_api_definitions()
+        if apis is None:
+            return False
+
+        indexed_rows = self._table.to_arrow().to_pylist()
+        indexed_defs: Dict[str, str] = {}
+        for row in indexed_rows:
+            api_id = row.get("api_id")
+            if api_id and api_id not in indexed_defs:
+                indexed_defs[api_id] = row.get("full_api_definition", "")
+
+        current_defs = {
+            api_id: json.dumps(definition, sort_keys=True)
+            for api_id, definition in apis.items()
+        }
+
+        if set(indexed_defs.keys()) != set(current_defs.keys()):
+            return True
+
+        for api_id, current_definition in current_defs.items():
+            stored_definition = indexed_defs.get(api_id)
+            if stored_definition != current_definition:
+                return True
+
+        return False
+
     async def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """Search for APIs matching the query.
         
@@ -136,11 +176,11 @@ class APIIndex:
             results = (
                 self._table.search(query_vector)
                 .limit(top_k)
-                .to_pandas()
+                .to_arrow()
             )
             
             matches = []
-            for _, row in results.iterrows():
+            for row in results.to_pylist():
                 distance = row.get('_distance', 1.0)
                 # Better similarity mapping for L2 (assuming normalized vectors)
                 similarity = 1.0 - (distance / 2.0)
@@ -163,14 +203,20 @@ class APIIndex:
         if not self._initialized:
             await self.initialize()
             
-        results = self._table.to_pandas()
+        results = self._table.to_arrow().to_pylist()
         # Group by api_id since one record per endpoint now
         apis = {}
-        for _, row in results.iterrows():
+        for row in results:
             api_id = row['api_id']
             if api_id not in apis:
                 apis[api_id] = json.loads(row['full_api_definition'])
         return apis
+
+    def _row_count(self) -> int:
+        """Get row count without requiring pandas at runtime."""
+        if self._table is None:
+            return 0
+        return len(self._table.to_arrow())
 
 
 _api_index: Optional[APIIndex] = None
