@@ -196,13 +196,66 @@ octo telegram
 
 ### Persistent Telegram Service
 
-To keep the bot alive after reboot and restart it automatically on failure:
+For a quick local demo, `octo telegram` is enough.
+
+For a server-style setup where users can keep messaging the bot without manually restarting the process, install the Telegram bot as a `systemd` service.
+
+1. Prepare the Telegram service environment file:
 
 ```bash
 cp deploy/systemd/octopos-telegram.env.example .env.telegram
-# fill TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_CHAT_IDS
-./deploy/scripts/install-telegram-service.sh --system
 ```
+
+Minimum required values inside `.env.telegram`:
+
+```bash
+OCTOPOS_FEATURE_TELEGRAM=true
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_ALLOWED_CHAT_IDS=123456789
+```
+
+Optional values:
+
+```bash
+TELEGRAM_CHAT_ID=123456789
+AWS_REGION=us-east-1
+AWS_PROFILE=default
+```
+
+2. Install the service.
+
+For a real server or VM, prefer a system service:
+
+```bash
+sudo ./deploy/scripts/install-telegram-service.sh --system
+```
+
+If `sudo` is not available or you only need a demo on your own machine, use a user service:
+
+```bash
+./deploy/scripts/install-telegram-service.sh --user
+```
+
+3. Verify the service:
+
+```bash
+systemctl --user status octopos-telegram
+journalctl --user -u octopos-telegram -f
+```
+
+For system mode:
+
+```bash
+sudo systemctl status octopos-telegram
+sudo journalctl -u octopos-telegram -f
+```
+
+Important notes:
+
+- `TELEGRAM_ALLOWED_CHAT_IDS` is the safety gate. Only those chats can use the bot.
+- `--system` is the correct mode for a persistent server deployment.
+- `--user` is useful for demos, but may stop working after logout or reboot.
+- If you use `--user` and want it to survive logout, enable linger for that user.
 
 Useful service commands:
 
@@ -403,6 +456,23 @@ Key variables:
 - `OCTO_AGENT_NAME` - Agent name
 - `OCTO_AGENT_PERSONA` - Agent personality (friendly/professional/technical)
 - `LOG_LEVEL` - Logging level (DEBUG/INFO/WARNING/ERROR)
+
+### Telegram As A Service
+
+Production recommendation for Telegram access:
+
+1. Keep the repo checked out on the host.
+2. Create `.env.telegram` from `deploy/systemd/octopos-telegram.env.example`.
+3. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_CHAT_IDS`.
+4. Install with `./deploy/scripts/install-telegram-service.sh --system`.
+5. Monitor with `systemctl` and `journalctl`.
+
+This gives you:
+
+- automatic restart on failure
+- startup on boot
+- no need to keep an interactive shell open
+- Telegram access restricted to approved chat IDs
 
 ---
 
