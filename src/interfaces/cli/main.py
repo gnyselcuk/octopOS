@@ -39,6 +39,7 @@ app.command(name="dlq", help="Manage Dead Letter Queue (failed messages).")(cli_
 app.command(name="ask", help="Ask octopOS a question or assign it a task.")(cli_commands.ask)
 app.command(name="chat", help="Start an interactive continuous chat session.")(cli_commands.chat)
 app.command(name="telegram", help="Start the Telegram bot in polling mode.")(cli_commands.telegram)
+app.command(name="slack", help="Start the Slack bot in Socket Mode.")(cli_commands.slack)
 app.command(name="browse", help="Run an autonomous browser mission (Nova Act).")(cli_commands.browse)
 app.command(name="voice", help="Start a real-time voice session (Nova Sonic).")(cli_commands.voice)
 

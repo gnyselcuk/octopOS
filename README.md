@@ -192,6 +192,12 @@ octo budget
 export OCTOPOS_FEATURE_TELEGRAM=true
 export TELEGRAM_BOT_TOKEN=your_bot_token
 octo telegram
+
+# Run Slack in Socket Mode
+export OCTOPOS_FEATURE_SLACK=true
+export SLACK_BOT_TOKEN=xoxb-...
+export SLACK_APP_TOKEN=xapp-...
+octo slack
 ```
 
 ### Persistent Telegram Service

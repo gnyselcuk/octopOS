@@ -369,6 +369,48 @@ def telegram(
         console.print(f"\n[bold red]✗ Telegram startup failed:[/bold red] {e}")
 
 
+@app.command("slack")
+def slack(
+    bot_token: Optional[str] = typer.Option(None, "--bot-token", envvar="SLACK_BOT_TOKEN", help="Slack bot token"),
+    app_token: Optional[str] = typer.Option(None, "--app-token", envvar="SLACK_APP_TOKEN", help="Slack app token for Socket Mode"),
+    signing_secret: Optional[str] = typer.Option(None, "--signing-secret", envvar="SLACK_SIGNING_SECRET", help="Slack signing secret (optional for Socket Mode)"),
+):
+    """Start the Slack bot in Socket Mode."""
+    from src.utils.feature_flags import FeatureFlags
+
+    if not FeatureFlags.slack_enabled():
+        console.print("[yellow]⚠ Slack integration is not enabled.[/yellow]")
+        console.print("[dim]Set OCTOPOS_FEATURE_SLACK=true to enable it.[/dim]")
+        raise typer.Exit(1)
+
+    if not bot_token:
+        console.print("[red]✗ Missing Slack bot token.[/red]")
+        console.print("[dim]Set SLACK_BOT_TOKEN or pass --bot-token.[/dim]")
+        raise typer.Exit(1)
+
+    if not app_token:
+        console.print("[red]✗ Missing Slack app token.[/red]")
+        console.print("[dim]Set SLACK_APP_TOKEN or pass --app-token.[/dim]")
+        raise typer.Exit(1)
+
+    from src.interfaces.slack.runtime import run_slack_socket_mode
+
+    console.print(Panel.fit("💬 [bold orange3]Slack Socket Mode[/bold orange3] starting...\nPress Ctrl+C to stop.", border_style="cyan"))
+
+    try:
+        asyncio.run(
+            run_slack_socket_mode(
+                bot_token=bot_token,
+                app_token=app_token,
+                signing_secret=signing_secret,
+            )
+        )
+    except KeyboardInterrupt:
+        console.print("\n[dim]Slack bot stopped.[/dim]")
+    except Exception as e:
+        console.print(f"\n[bold red]✗ Slack startup failed:[/bold red] {e}")
+
+
 @app.command("browse")
 def browse(
     mission: str = typer.Argument(..., help="Browser mission / task in natural language"),
