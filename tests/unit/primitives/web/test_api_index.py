@@ -83,3 +83,44 @@ async def test_initialize_resyncs_when_catalog_definition_changed(tmp_path):
         await index.initialize()
 
     mock_sync.assert_awaited_once()
+
+
+def test_load_api_definitions_expands_user_home(tmp_path, monkeypatch):
+    home_dir = tmp_path / "home"
+    catalog_dir = home_dir / ".octopos" / "data" / "config"
+    catalog_dir.mkdir(parents=True)
+    catalog_path = catalog_dir / "public_apis.json"
+    catalog_path.write_text('{"coinbase": {"endpoints": {}}}', encoding="utf-8")
+
+    with patch("src.primitives.web.api_index.get_config") as mock_get_config, \
+         patch("src.primitives.web.api_index.get_bedrock_client"):
+        config = MagicMock()
+        config.lancedb.path = str(tmp_path / "lancedb")
+        config.lancedb.table_public_apis = "public_apis"
+        mock_get_config.return_value = config
+        monkeypatch.setenv("HOME", str(home_dir))
+        index = APIIndex()
+
+    definitions = index._load_api_definitions()
+
+    assert definitions == {"coinbase": {"endpoints": {}}}
+
+
+def test_load_api_definitions_uses_repo_fallback_when_user_catalog_missing(tmp_path):
+    repo_catalog = tmp_path / "data" / "config"
+    repo_catalog.mkdir(parents=True)
+    repo_catalog_path = repo_catalog / "public_apis.json"
+    repo_catalog_path.write_text('{"coingecko": {"endpoints": {}}}', encoding="utf-8")
+
+    with patch("src.primitives.web.api_index.get_config") as mock_get_config, \
+         patch("src.primitives.web.api_index.get_bedrock_client"):
+        config = MagicMock()
+        config.lancedb.path = str(tmp_path / "lancedb")
+        config.lancedb.table_public_apis = "public_apis"
+        mock_get_config.return_value = config
+        index = APIIndex(json_path=str(tmp_path / "missing.json"))
+
+    with patch.object(index, "_candidate_json_paths", return_value=[tmp_path / "missing.json", repo_catalog_path]):
+        definitions = index._load_api_definitions()
+
+    assert definitions == {"coingecko": {"endpoints": {}}}

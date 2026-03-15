@@ -10,6 +10,14 @@ import aiohttp
 from src.interfaces.telegram.bot import TelegramBot, TelegramConfig
 
 
+def make_aiohttp_context(response):
+    """Build an async context manager that yields a mocked response."""
+    context = AsyncMock()
+    context.__aenter__.return_value = response
+    context.__aexit__.return_value = False
+    return context
+
+
 class TestTelegramConfig:
     """Test TelegramConfig dataclass."""
     
@@ -125,7 +133,7 @@ class TestTelegramBotSendMessage:
         mock_response = MagicMock()
         mock_response.status = 200
         
-        with patch.object(bot._session, 'post', return_value=mock_response) as mock_post:
+        with patch.object(bot._session, 'post', return_value=make_aiohttp_context(mock_response)) as mock_post:
             result = await bot.send_message(
                 chat_id="123456",
                 text="Hello, World!"
@@ -149,7 +157,7 @@ class TestTelegramBotSendMessage:
         mock_response = MagicMock()
         mock_response.status = 200
         
-        with patch.object(bot._session, 'post', return_value=mock_response) as mock_post:
+        with patch.object(bot._session, 'post', return_value=make_aiohttp_context(mock_response)) as mock_post:
             await bot.send_message(
                 chat_id="123456",
                 text="Reply text",
@@ -177,7 +185,7 @@ class TestTelegramBotSendMessage:
         mock_response = MagicMock()
         mock_response.status = 400
         
-        with patch.object(bot._session, 'post', return_value=mock_response):
+        with patch.object(bot._session, 'post', return_value=make_aiohttp_context(mock_response)):
             result = await bot.send_message(
                 chat_id="123456",
                 text="Hello"
@@ -260,11 +268,13 @@ class TestTelegramBotAPIBase:
         mock_response = MagicMock()
         mock_response.status = 200
         
-        with patch.object(bot._session, 'post', return_value=mock_response) as mock_post:
+        with patch.object(bot._session, 'post', return_value=make_aiohttp_context(mock_response)) as mock_post:
             await bot.send_message(chat_id="123", text="test")
             
             call_args = mock_post.call_args
-            assert "https://api.telegram.org/bottest_token/sendMessage" == call_args[0][0]
+            assert "https://api.telegram.org/botmy_bot_token/sendMessage" == call_args[0][0]
+
+        await bot.stop()
 
 
 class TestTelegramBotParseModes:
@@ -285,7 +295,7 @@ class TestTelegramBotParseModes:
         mock_response = MagicMock()
         mock_response.status = 200
         
-        with patch.object(bot._session, 'post', return_value=mock_response) as mock_post:
+        with patch.object(bot._session, 'post', return_value=make_aiohttp_context(mock_response)) as mock_post:
             await bot.send_message(
                 chat_id="123",
                 text="<b>Bold</b> text",
@@ -303,7 +313,7 @@ class TestTelegramBotParseModes:
         mock_response = MagicMock()
         mock_response.status = 200
         
-        with patch.object(bot._session, 'post', return_value=mock_response) as mock_post:
+        with patch.object(bot._session, 'post', return_value=make_aiohttp_context(mock_response)) as mock_post:
             await bot.send_message(
                 chat_id="123",
                 text="*Bold* text",
@@ -337,3 +347,39 @@ class TestTelegramBotIntegration:
         # Stop
         await bot.stop()
         assert bot._running is False
+
+
+class TestTelegramBotPolling:
+    """Test Telegram long polling helpers."""
+
+    @pytest.fixture
+    def bot(self):
+        config = TelegramConfig(bot_token="test_token")
+        return TelegramBot(config)
+
+    @pytest.mark.asyncio
+    async def test_poll_once_updates_offset_and_dispatches(self, bot):
+        bot.get_updates = AsyncMock(return_value=[
+            {"update_id": 10, "message": {"text": "one"}},
+            {"update_id": 11, "message": {"text": "two"}},
+        ])
+        bot.process_update = AsyncMock()
+
+        next_offset = await bot.poll_once(timeout=5)
+
+        assert next_offset == 12
+        assert bot._update_offset == 12
+        assert bot.process_update.await_count == 2
+        bot.get_updates.assert_awaited_once_with(offset=0, timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_poll_once_without_updates_keeps_offset(self, bot):
+        bot._update_offset = 21
+        bot.get_updates = AsyncMock(return_value=[])
+        bot.process_update = AsyncMock()
+
+        next_offset = await bot.poll_once()
+
+        assert next_offset == 21
+        assert bot._update_offset == 21
+        bot.process_update.assert_not_awaited()

@@ -13,7 +13,7 @@ Example:
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 from uuid import UUID, uuid4
@@ -100,7 +100,7 @@ class PlatformMessage:
     reply_to_message_id: Optional[str] = None
     
     # Timestamps
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     edited_at: Optional[str] = None
     
     # Metadata

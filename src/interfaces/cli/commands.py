@@ -330,6 +330,45 @@ def chat():
     asyncio.run(chat_loop())
 
 
+@app.command("telegram")
+def telegram(
+    token: Optional[str] = typer.Option(None, "--token", envvar="TELEGRAM_BOT_TOKEN", help="Telegram bot token"),
+    chat_id: Optional[str] = typer.Option(None, "--chat-id", envvar="TELEGRAM_CHAT_ID", help="Optional chat id for startup ping"),
+    polling_interval: int = typer.Option(1, "--polling-interval", min=0, help="Delay between poll cycles"),
+    polling_timeout: int = typer.Option(30, "--polling-timeout", min=1, help="Telegram long polling timeout in seconds"),
+):
+    """Start the Telegram bot in polling mode."""
+    from src.utils.feature_flags import FeatureFlags
+
+    if not FeatureFlags.telegram_enabled():
+        console.print("[yellow]⚠ Telegram integration is not enabled.[/yellow]")
+        console.print("[dim]Set OCTOPOS_FEATURE_TELEGRAM=true to enable it.[/dim]")
+        raise typer.Exit(1)
+
+    if not token:
+        console.print("[red]✗ Missing Telegram bot token.[/red]")
+        console.print("[dim]Set TELEGRAM_BOT_TOKEN or pass --token.[/dim]")
+        raise typer.Exit(1)
+
+    from src.interfaces.telegram.runtime import run_telegram_polling
+
+    console.print(Panel.fit("🤖 [bold orange3]Telegram polling[/bold orange3] starting...\nPress Ctrl+C to stop.", border_style="cyan"))
+
+    try:
+        asyncio.run(
+            run_telegram_polling(
+                bot_token=token,
+                chat_id=chat_id,
+                polling_interval=polling_interval,
+                polling_timeout=polling_timeout,
+            )
+        )
+    except KeyboardInterrupt:
+        console.print("\n[dim]Telegram bot stopped.[/dim]")
+    except Exception as e:
+        console.print(f"\n[bold red]✗ Telegram startup failed:[/bold red] {e}")
+
+
 @app.command("browse")
 def browse(
     mission: str = typer.Argument(..., help="Browser mission / task in natural language"),

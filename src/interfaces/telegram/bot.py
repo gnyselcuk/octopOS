@@ -20,6 +20,7 @@ class TelegramConfig:
     bot_token: str
     webhook_url: Optional[str] = None
     polling_interval: int = 1
+    polling_timeout: int = 30
     allowed_updates: List[str] = None
     
     def __post_init__(self):
@@ -41,10 +42,14 @@ class TelegramBot:
         self._session: Optional[aiohttp.ClientSession] = None
         self._running = False
         self._message_handlers: List[Callable] = []
+        self._update_offset = 0
         
     async def start(self):
         """Start the bot."""
-        self._session = aiohttp.ClientSession()
+        if self._running and self._session and not self._session.closed:
+            return
+        if not self._session or self._session.closed:
+            self._session = aiohttp.ClientSession()
         self._running = True
         logger.info("Telegram bot started")
         
@@ -53,6 +58,7 @@ class TelegramBot:
         self._running = False
         if self._session:
             await self._session.close()
+            self._session = None
         logger.info("Telegram bot stopped")
         
     async def send_message(
@@ -60,7 +66,7 @@ class TelegramBot:
         chat_id: str,
         text: str,
         reply_to: Optional[str] = None,
-        parse_mode: str = "HTML"
+        parse_mode: Optional[str] = "HTML"
     ) -> bool:
         """Send a text message."""
         if not self._session:
@@ -70,8 +76,9 @@ class TelegramBot:
         payload = {
             "chat_id": chat_id,
             "text": text,
-            "parse_mode": parse_mode
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if reply_to:
             payload["reply_to_message_id"] = reply_to
             
@@ -240,3 +247,69 @@ class TelegramBot:
     def on_message(self, handler: Callable):
         """Register message handler."""
         self._message_handlers.append(handler)
+
+    async def get_updates(
+        self,
+        offset: Optional[int] = None,
+        timeout: Optional[int] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Fetch updates from Telegram using long polling."""
+        if not self._session:
+            return []
+
+        url = self.API_BASE.format(token=self.config.bot_token, method="getUpdates")
+        payload: Dict[str, Any] = {
+            "timeout": timeout if timeout is not None else self.config.polling_timeout,
+            "limit": limit,
+            "allowed_updates": self.config.allowed_updates,
+        }
+        if offset is not None:
+            payload["offset"] = offset
+
+        try:
+            async with self._session.get(url, params=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(f"get_updates failed {resp.status}: {body[:200]}")
+                    return []
+
+                data = await resp.json()
+                if not data.get("ok"):
+                    logger.error(f"get_updates returned non-ok payload: {data}")
+                    return []
+                return data.get("result", [])
+        except Exception as e:
+            logger.error(f"Failed to get updates: {e}")
+            return []
+
+    async def process_update(self, update: Dict[str, Any]) -> None:
+        """Dispatch a single update to registered handlers."""
+        for handler in self._message_handlers:
+            try:
+                await handler(update)
+            except Exception as e:
+                logger.error(f"Telegram message handler failed: {e}")
+
+    async def poll_once(self, timeout: Optional[int] = None) -> int:
+        """Fetch one long-poll batch and process received updates."""
+        updates = await self.get_updates(offset=self._update_offset, timeout=timeout)
+        next_offset = self._update_offset
+
+        for update in updates:
+            update_id = int(update.get("update_id", 0))
+            next_offset = max(next_offset, update_id + 1)
+            await self.process_update(update)
+
+        self._update_offset = next_offset
+        return next_offset
+
+    async def poll_forever(self) -> None:
+        """Run the long-poll loop until the bot is stopped."""
+        if not self._running:
+            await self.start()
+
+        while self._running:
+            await self.poll_once(timeout=self.config.polling_timeout)
+            if self.config.polling_interval > 0:
+                await asyncio.sleep(self.config.polling_interval)

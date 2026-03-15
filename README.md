@@ -187,6 +187,29 @@ octo agent-status
 
 # Check budget usage
 octo budget
+
+# Run Telegram bot polling
+export OCTOPOS_FEATURE_TELEGRAM=true
+export TELEGRAM_BOT_TOKEN=your_bot_token
+octo telegram
+```
+
+### Persistent Telegram Service
+
+To keep the bot alive after reboot and restart it automatically on failure:
+
+```bash
+cp deploy/systemd/octopos-telegram.env.example .env.telegram
+# fill TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_CHAT_IDS
+./deploy/scripts/install-telegram-service.sh --system
+```
+
+Useful service commands:
+
+```bash
+sudo systemctl status octopos-telegram
+sudo systemctl restart octopos-telegram
+sudo journalctl -u octopos-telegram -f
 ```
 
 ---

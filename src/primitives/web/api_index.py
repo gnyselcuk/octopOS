@@ -4,6 +4,7 @@ Indexes API definitions from a JSON file into LanceDB for semantic retrieval.
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -23,12 +24,35 @@ class APIIndex:
             json_path: Path to the JSON file containing API definitions
         """
         self._config = get_config()
-        self._json_path = json_path or "~/.octopos/data/config/public_apis.json"
+        self._json_path = json_path or os.getenv("PUBLIC_API_CATALOG_PATH") or "~/.octopos/data/config/public_apis.json"
         self._db_path = self._config.lancedb.path
         self._table_name = self._config.lancedb.table_public_apis
         self._bedrock_client = None
         self._table = None
         self._initialized = False
+
+    def _candidate_json_paths(self) -> List[Path]:
+        """Return candidate API catalog paths ordered by preference."""
+        candidates = [Path(self._json_path).expanduser()]
+        repo_catalog = Path(__file__).resolve().parents[3] / "data" / "config" / "public_apis.json"
+        candidates.append(repo_catalog)
+
+        unique_candidates: List[Path] = []
+        seen = set()
+        for candidate in candidates:
+            normalized = str(candidate)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_candidates.append(candidate)
+        return unique_candidates
+
+    def _resolve_json_path(self) -> Optional[Path]:
+        """Resolve the first existing API catalog path."""
+        for candidate in self._candidate_json_paths():
+            if candidate.exists():
+                return candidate
+        return None
         
     async def initialize(self) -> None:
         """Initialize database connection and sync with JSON if needed."""
@@ -123,10 +147,14 @@ class APIIndex:
 
     def _load_api_definitions(self) -> Optional[Dict[str, Any]]:
         """Load curated API definitions from disk."""
-        json_file = Path(self._json_path)
-        if not json_file.exists():
-            logger.warning(f"API definition file not found: {self._json_path}")
+        json_file = self._resolve_json_path()
+        if json_file is None:
+            searched = ", ".join(str(path) for path in self._candidate_json_paths())
+            logger.warning(f"API definition file not found. Searched: {searched}")
             return None
+
+        if str(json_file) != str(Path(self._json_path).expanduser()):
+            logger.info(f"Using fallback API catalog: {json_file}")
 
         with open(json_file, 'r', encoding='utf-8') as f:
             return json.load(f)
