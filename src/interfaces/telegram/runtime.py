@@ -163,7 +163,7 @@ async def run_telegram_polling(
     )
 
     if chat_id:
-        await bot.send_message(chat_id=chat_id, text="octopOS Telegram baglantisi aktif.", parse_mode=None)
+        await bot.send_message(chat_id=chat_id, text="octopOS Telegram connection is active.", parse_mode=None)
 
     try:
         await bot.poll_forever()
